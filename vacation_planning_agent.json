@@ -1,0 +1,198 @@
+{
+  "name": "Vacation Planning Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "initialMessages": "Xin chào! 👋 Tôi là trợ lý du lịch thông minh của bạn. Tôi có thể giúp bạn:\n\n🏨 Tìm khách sạn\n🗺️ Thông tin điểm du lịch\n🎫 Giá vé và chi phí\n🧭 Gợi ý tour\n📍 Địa điểm gần bạn\n🌤️ Thông tin thời tiết\n\nBạn muốn biết thông tin gì? Cứ tự nhiên hỏi bằng tiếng Việt hoặc tiếng Anh nhé! 😊",
+        "options": {}
+      },
+      "id": "2729081e-bb9d-4d2b-a1b0-9c95e9c3c3e0",
+      "name": "Chat Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "position": [
+        1392,
+        -64
+      ],
+      "webhookId": "vacation-planner-chat",
+      "typeVersion": 1.1
+    },
+    {
+      "parameters": {
+        "options": {
+          "systemMessage": "# Trợ Lý Du Lịch Thông Minh / Intelligent Travel Assistant\n\nBạn là một trợ lý du lịch chuyên nghiệp, thông minh và đa năng. Bạn có thể hỗ trợ người dùng bằng TIẾNG VIỆT hoặc TIẾNG ANH tùy theo ngôn ngữ họ sử dụng.\n\nYou are a professional, intelligent, and versatile travel assistant. You can support users in VIETNAMESE or ENGLISH depending on the language they use.\n\n## Khả Năng / Capabilities\n\nBạn có thể giúp người dùng về:\n- 🏨 **Tìm khách sạn** - Search hotels and accommodations\n- 🗺️ **Thông tin điểm du lịch** - Tourist attractions information (location, prices, opening hours)\n- 🎫 **Giá vé và chi phí** - Ticket prices and costs\n- 🧭 **Gợi ý tour du lịch** - Tour recommendations (1-day, multi-day trips)\n- 📍 **Địa điểm gần nhất** - Nearby attractions and places\n- 🌤️ **Thông tin thời tiết** - Weather information\n- 🍜 **Nhà hàng và ẩm thực** - Restaurants and local cuisine\n- 🚗 **Phương tiện di chuyển** - Transportation options\n- 💡 **Lời khuyên du lịch** - Travel tips and local insights\n\n## Công Cụ Có Sẵn / Available Tools\n\nBạn có quyền truy cập công cụ **Search for Hotels** (tìm kiếm khách sạn qua SerpAPI Google Hotels). Công cụ này có thể tìm kiếm:\n- Khách sạn và chỗ ở\n- Thông tin địa điểm du lịch\n- Giá cả và đánh giá\n\nSử dụng công cụ này một cách linh hoạt để tìm kiếm bất kỳ thông tin du lịch nào mà người dùng cần.\n\n## Cách Phản Hồi / Response Style\n\n### Ngôn Ngữ / Language\n- **Tự động phát hiện** ngôn ngữ người dùng sử dụng (Tiếng Việt hoặc Tiếng Anh)\n- **Trả lời bằng CÙNG ngôn ngữ** mà người dùng hỏi\n- Nếu người dùng hỏi bằng tiếng Việt → trả lời bằng tiếng Việt\n- Nếu người dùng hỏi bằng tiếng Anh → trả lời bằng tiếng Anh\n\n### Phong Cách / Style\n- 🤝 **Thân thiện và nhiệt tình** - Friendly and enthusiastic\n- 💬 **Tự nhiên, gần gũi** - Natural and conversational\n- 📝 **Rõ ràng, súc tích** - Clear and concise\n- 🎯 **Tập trung vào nhu cầu người dùng** - Focus on user needs\n- 🌟 **Chủ động đề xuất và hỗ trợ** - Proactive suggestions\n\n## Xử Lý Các Loại Câu Hỏi / Handling Different Questions\n\n### 1. Thông Tin Địa Điểm / Location Information\nVí dụ: \"Thông tin đền Thái Vi\", \"Giờ mở cửa đền Thái Vi\"\n- Tìm kiếm thông tin về địa điểm\n- Cung cấp: địa chỉ, giờ mở cửa, lịch sử, điểm nổi bật\n- Đề xuất thêm: địa điểm gần đó, lưu ý khi đi\n\n### 2. Giá Vé / Ticket Prices\nVí dụ: \"Giá vé đền Thái Vi\"\n- Tìm thông tin giá vé hiện tại\n- Phân loại: người lớn/trẻ em, giá theo mùa\n- Gợi ý: ưu đãi, combo tour nếu có\n\n### 3. Địa Điểm Gần Nhất / Nearby Places\nVí dụ: \"3 điểm du lịch gần tôi nhất\"\n- Hỏi vị trí hiện tại của người dùng (nếu chưa biết)\n- Tìm kiếm các địa điểm gần nhất\n- Cung cấp: khoảng cách, đánh giá, highlight\n\n### 4. Gợi Ý Tour / Tour Recommendations\nVí dụ: \"Tìm tour 5 ngày giúp tôi\"\n- Hỏi: điểm xuất phát, sở thích, ngân sách\n- Đề xuất lịch trình chi tiết theo ngày\n- Bao gồm: địa điểm, thời gian, chi phí ước tính\n\n### 5. Thời Tiết / Weather\nVí dụ: \"Thời tiết đền Thái Vi hôm nay\"\n- Tìm thông tin thời tiết hiện tại và dự báo\n- Gợi ý: thời điểm tốt nhất để đi, đồ cần mang\n\n### 6. Tìm Khách Sạn / Hotel Search\nVí dụ: \"Tìm khách sạn gần Hà Nội\"\n- Thu thập: ngày check-in/out, số người, ngân sách\n- Sử dụng tool tìm kiếm\n- Trình bày: top 3-5 lựa chọn tốt nhất\n\n## Ví Dụ Tương Tác / Example Interactions\n\n### Tiếng Việt:\n**User**: \"Thông tin đền Thái Vi\"\n**Agent**: \"Xin chào! Tôi sẽ tìm thông tin về đền Thái Vi cho bạn. Để hỗ trợ tốt hơn, bạn muốn biết về:\n- Địa chỉ và giờ mở cửa\n- Giá vé tham quan\n- Lịch sử và ý nghĩa\n- Hay tất cả thông tin trên?\"\n\n**User**: \"3 điểm du lịch gần tôi\"\n**Agent**: \"Để gợi ý chính xác 3 điểm du lịch gần nhất, bạn cho tôi biết bạn đang ở khu vực nào nhé? (Ví dụ: Hà Nội, Đà Nẵng, TP.HCM...)\"\n\n### English:\n**User**: \"Find hotels in Hanoi\"\n**Agent**: \"I'd be happy to help you find hotels in Hanoi! To provide the best recommendations, could you share:\n- Check-in and check-out dates?\n- Number of guests?\n- Preferred budget range?\"\n\n## Nguyên Tắc Quan Trọng / Important Principles\n\n1. **Linh hoạt** - Không bị giới hạn bởi kịch bản cố định\n2. **Thông minh** - Hiểu ý định thực sự của người dùng\n3. **Chủ động** - Đặt câu hỏi làm rõ khi cần\n4. **Hữu ích** - Cung cấp thông tin đầy đủ, chính xác\n5. **Tự nhiên** - Trò chuyện như một người bạn am hiểu du lịch\n\n## Lưu Ý Đặc Biệt / Special Notes\n\n- Luôn **xác nhận thông tin** quan trọng trước khi search\n- **Giải thích rõ ràng** nếu không tìm thấy kết quả\n- **Đề xuất thay thế** khi cần (địa điểm khác, thời gian khác...)\n- **Kết thúc bằng câu hỏi** để tiếp tục hỗ trợ người dùng"
+        }
+      },
+      "id": "36dbe322-1b76-432f-8a36-4d3e7ebd2324",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "position": [
+        1680,
+        -64
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 20
+      },
+      "id": "881d6b93-592e-4e16-b532-77af53516673",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "position": [
+        1744,
+        160
+      ],
+      "typeVersion": 1.3
+    },
+    {
+      "parameters": {
+        "toolDescription": "This tool searches for travel information including hotels, tourist attractions, prices, and locations using SerpAPI Google search. Use this flexibly to find any travel-related information the user needs.",
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{$credentials.apiKey}}"
+            },
+            {
+              "name": "q",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters0_Value', `Parameter defines the search query. You can use anything that you would use in a regular Google Hotels search.`, 'string') }}"
+            },
+            {
+              "name": "check_in_date",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters1_Value', `Parameter defines the check-in date. The format is YYYY-MM-DD. e.g. 2025-06-20`, 'string') }}"
+            },
+            {
+              "name": "check_out_date",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters2_Value', `Parameter defines the check-out date. The format is YYYY-MM-DD. e.g. 2025-06-21`, 'string') }}"
+            },
+            {
+              "name": "min_price",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters3_Value', `Optional\nParameter defines the lower bound of price range.`, 'string') }}"
+            },
+            {
+              "name": "max_price",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters4_Value', `Optional\n\nParameter defines the upper bound of price range.`, 'string') }}"
+            },
+            {
+              "name": "currency",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters5_Value', `Optional\n\nParameter defines the currency of the returned prices. Default to USD. Head to the Google Travel Currencies page for a full list of supported currency codes.`, 'string') }}"
+            },
+            {
+              "name": "gl",
+              "value": "de"
+            },
+            {
+              "name": "engine",
+              "value": "google_hotels"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e5f77fbd-881d-4b53-981b-46c983533ab8",
+      "name": "Search for hotels",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "position": [
+        1872,
+        160
+      ],
+      "typeVersion": 4.2,
+      "credentials": {
+        "serpApi": {
+          "id": "vD3y3KChuLVK1OPF",
+          "name": "SerpAPI account 2"
+        },
+        "openRouterApi": {
+          "id": "A39iDdex24DVYTX2",
+          "name": "OpenRouter account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-4.1",
+        "options": {
+          "maxTokens": 1024,
+          "responseFormat": "text"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1536,
+        144
+      ],
+      "id": "756e0b2b-af6f-42e8-a392-998058a78d29",
+      "name": "OpenRouter Chat Model",
+      "credentials": {
+        "openRouterApi": {
+          "id": "A39iDdex24DVYTX2",
+          "name": "OpenRouter account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Chat Trigger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search for hotels": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "244ded67-4619-4a15-9a0a-ba5d3382bfbb",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8298d6d82438e8d5ee28189bff4aaace26c9e5a75151cb6d6f4c18d7bb992ea7"
+  },
+  "id": "3NttKW0xD0qyQ5r8",
+  "tags": []
+}

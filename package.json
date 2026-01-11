@@ -1,0 +1,27 @@
+{
+  "name": "n8n-travel-chatbot",
+  "version": "1.0.0",
+  "description": "n8n Travel Chatbot with Gemini API",
+  "main": "index.js",
+  "scripts": {
+    "start": "n8n start",
+    "dev": "n8n start",
+    "tunnel": "n8n start --tunnel",
+    "update": "npm install -g n8n@1.2.4"
+  },
+  "keywords": [
+    "n8n",
+    "workflow",
+    "automation",
+    "chatbot",
+    "gemini"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "n8n": "1.2.4"
+  },
+  "engines": {
+    "node": ">=18.10.0 <=20.x"
+  }
+}
