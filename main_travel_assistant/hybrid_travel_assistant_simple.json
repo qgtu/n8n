@@ -1,0 +1,1117 @@
+{
+  "name": "Hybrid Travel Assistant - Simple Form",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "travel-form",
+        "responseMode": "lastNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "webhook-node",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 300],
+      "webhookId": "travel-form-simple"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== EXTRACT SESSION ID =====\n// Mission: Get or generate unique sessionId from request\n\nconst body = $json.body || {};\nconst query = $json.query || {};\n\n// Try to get existing sessionId from client\nlet sessionId = body.sessionId || query.sessionId;\n\n// If no sessionId provided, generate new UUID-style ID\nif (!sessionId) {\n  const timestamp = Date.now();\n  const random = Math.random().toString(36).substring(2, 15);\n  const random2 = Math.random().toString(36).substring(2, 15);\n  sessionId = `sess_${timestamp}_${random}${random2}`;\n}\n\nconst message = body.message || '';\nconst userId = body.userId || 'anonymous';\n\nreturn {\n  sessionId,\n  message,\n  userId\n};"
+      },
+      "id": "extract-session-node",
+      "name": "Extract SessionId",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/get",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"sessionId\": $json.sessionId } }}",
+        "options": {}
+      },
+      "id": "memory-get-session-node",
+      "name": "Memory: Get Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [550, 300],
+      "notes": "🧠 External Memory Service\n📍 http://localhost:3333\n🔍 Get session context"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse memory service response\nconst memoryData = $json.data || null;\nconst sessionData = $('Extract SessionId').item.json;\n\nreturn {\n  sessionId: sessionData.sessionId,\n  message: sessionData.message,\n  userId: sessionData.userId,\n  context: memoryData\n};"
+      },
+      "id": "parse-memory-node",
+      "name": "Parse Memory Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.message }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "validate-node",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  sessionId: $json.sessionId,\n  intent: 'validation_error',\n  response: 'Vui lòng nhập nội dung yêu cầu (tối thiểu 3 ký tự). Ví dụ: \"thời tiết Hà Nội\"',\n  type: 'error'\n};"
+      },
+      "id": "validation-error-node",
+      "name": "Validation_Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== RULE-BASED INTENT + CONTEXT MERGE =====\n// Mission: Parse intent from keywords + merge with memory context\n\nconst memData = $('Parse Memory Response').item.json;\n\nconst sessionId = memData.sessionId;\nconst message = (memData.message || '').toLowerCase().trim();\nconst userId = memData.userId;\n\n// Get existing context from memory (null if new session)\nconst oldContext = memData.context || {};\nconst previousIntent = oldContext.lastIntent;\nconst previousLocation = oldContext.last_place;\n\n// ===== RULE-BASED INTENT DETECTION =====\nconst rules = [\n  { intent: 'get_weather', keywords: ['thời tiết', 'weather', 'trời', 'nắng', 'mưa'] },\n  { intent: 'search_hotel', keywords: ['khách sạn', 'hotel', 'chỗ ở', 'nghỉ'] },\n  { intent: 'get_attraction_info', keywords: ['điểm tham quan', 'attraction', 'du lịch', 'tham quan'] }\n];\n\nconst matched = rules.find(r => r.keywords.some(kw => message.includes(kw)));\nconst newIntent = matched?.intent || 'unknown';\n\nreturn {\n  sessionId,\n  userId,\n  message,\n  message_original: memData.message || '',\n  intent: newIntent,\n  needs_ai: !matched,\n  // Context to pass forward (will update MongoDB later)\n  sessionContext: {\n    previousIntent,\n    previousLocation,\n    conversationCount: (oldContext.conversationCount || 0) + 1\n  }\n};"
+      },
+      "id": "rule-intent-node",
+      "name": "Rule-Based Intent + Context Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PREPARE SESSION CONTEXT =====\n// Mission: Build session context for memory service\n\nconst ruleData = $('Rule-Based Intent + Context Merge').item.json;\nconst sessionId = ruleData.sessionId;\nconst userId = ruleData.userId;\nconst intent = ruleData.intent;\nconst message = ruleData.message_original;\n\n// Build minimal context (KHÔNG lưu full chat history)\nconst context = {\n  lastIntent: intent,\n  lastMessage: message,\n  conversationCount: ruleData.sessionContext.conversationCount,\n  userId: userId\n};\n\nreturn {\n  sessionId,\n  context,\n  // Pass forward for next nodes\n  intent: ruleData.intent,\n  needs_ai: ruleData.needs_ai,\n  message: ruleData.message,\n  message_original: ruleData.message_original,\n  sessionContext: ruleData.sessionContext\n};"
+      },
+      "id": "prepare-session-context-node",
+      "name": "Prepare Session Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3333/set",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"sessionId\": $json.sessionId, \"data\": $json.context, \"ttl\": 1800 } }}",
+        "options": {}
+      },
+      "id": "memory-set-session-node",
+      "name": "Memory: Save Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, 300],
+      "notes": "🧠 External Memory Service\n📍 http://localhost:3333/set\n⏱️ TTL: 1800s (30 min)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass through data from Prepare Session Context\nconst prepData = $('Prepare Session Context').item.json;\n\nreturn {\n  sessionId: prepData.sessionId,\n  intent: prepData.intent,\n  needs_ai: prepData.needs_ai,\n  message: prepData.message,\n  message_original: prepData.message_original,\n  sessionContext: prepData.sessionContext\n};"
+      },
+      "id": "pass-through-node",
+      "name": "Pass Through Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.needs_ai }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-ai-node",
+      "name": "AI Fallback Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"openai/gpt-oss-120b:free\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Phân loại intent. Chỉ trả về JSON: {\\\"intent\\\": \\\"get_weather\\\" | \\\"search_hotel\\\" | \\\"get_attraction_info\\\" | \\\"unknown\\\"}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"{{ $json.message }}\"\n    }\n  ],\n  \"temperature\": 0.1,\n  \"max_tokens\": 50\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "ai-agent-node",
+      "name": "AI Agent (Fallback ONLY)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, 100],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "OPENROUTER_API_CREDENTIAL",
+          "name": "OpenRouter API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const content = $json.choices?.[0]?.message?.content || '{}';\nlet parsed = {};\ntry { parsed = JSON.parse(content); } catch(e) {}\n\nreturn {\n  intent: parsed.intent || 'unknown',\n  message: $('AI Fallback Check').item.json.message,\n  message_original: $('AI Fallback Check').item.json.message_original\n};"
+      },
+      "id": "parse-ai-node",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== CONTEXT BUILDER: NORMALIZE USER INPUT =====\n// Mission: Clean \"dirty\" user input → geocode-ready location\n\nconst message = $json.message || '';\nlet locationRaw = null;\nlet locationClean = null;\n\n// ===== STEP 1: EXTRACT LOCATION (MULTIPLE STRATEGIES) =====\n\n// Strategy A: After \"ở\" keyword\n// \"thời tiết ở hồ gươm hiện tại\" → \"hồ gươm hiện tại\"\nconst matchAfterO = message.match(/ở\\s+([^,?.!]+)/i);\nif (matchAfterO) {\n  locationRaw = matchAfterO[1].trim();\n}\n\n// Strategy B: After comma\nif (!locationRaw) {\n  const parts = message.split(',').map(s => s.trim()).filter(Boolean);\n  if (parts.length > 1) {\n    locationRaw = parts[parts.length - 1];\n  }\n}\n\n// Strategy C: Remove weather keywords from beginning\nif (!locationRaw) {\n  const weatherKeywords = [\n    'thời tiết', 'weather', 'trời', 'nắng', 'mưa',\n    'bây giờ', 'hiện tại', 'hôm nay', 'ngày mai'\n  ];\n  \n  let cleaned = message;\n  for (const kw of weatherKeywords) {\n    cleaned = cleaned.replace(new RegExp(`^${kw}\\\\s*`, 'i'), '');\n    cleaned = cleaned.replace(new RegExp(`\\\\s+${kw}\\\\s*$`, 'i'), '');\n  }\n  \n  cleaned = cleaned.trim();\n  if (cleaned && cleaned !== message) {\n    locationRaw = cleaned;\n  }\n}\n\n// ===== STEP 2: CLEAN LOCATION TEXT (REMOVE TIME/QUESTION WORDS) =====\nif (locationRaw) {\n  const timeNoiseWords = [\n    'hiện tại', 'bây giờ', 'lúc này',\n    'hôm nay', 'ngày mai', 'mốt', 'kìa',\n    'cuối tuần', 'tuần này',\n    'là bao nhiêu độ', 'thế nào', 'ra sao',\n    'không', 'có', 'là', 'đang'\n  ];\n  \n  locationClean = locationRaw;\n  for (const noise of timeNoiseWords) {\n    locationClean = locationClean.replace(new RegExp(`\\\\s*${noise}\\\\s*`, 'gi'), ' ');\n  }\n  \n  locationClean = locationClean.replace(/[?!.]+$/g, '').trim();\n  locationClean = locationClean.replace(/\\s+/g, ' ');\n  \n  if (locationClean.length < 2) {\n    locationClean = null;\n  }\n}\n\n// ===== STEP 3: EXTRACT TIME INTENT =====\nlet timeIntent = 'today';\n\nif (message.includes('ngày mai') || message.includes('mai') || message.includes('tomorrow')) {\n  timeIntent = 'tomorrow';\n} else if (message.includes('ngày mốt') || message.includes('mốt') || message.includes('ngày kia')) {\n  timeIntent = 'day_after';\n} else if (message.includes('ngày kìa')) {\n  timeIntent = 'day_after_next';\n} else if (message.match(/(\\d+)\\s*(ngày|days?)\\s*(tới|nữa|sau)/)) {\n  timeIntent = 'n_days';\n} else if (message.includes('vài ngày') || message.includes('mấy ngày')) {\n  timeIntent = 'few_days';\n} else if (message.includes('cuối tuần') || message.includes('weekend')) {\n  timeIntent = 'weekend';\n} else if (message.includes('tuần này') || message.includes('this week')) {\n  timeIntent = 'this_week';\n} else if (message.match(/(\\d{1,2})[\\/\\-](\\d{1,2})[\\/\\-](\\d{4})/)) {\n  timeIntent = 'specific_date';\n}\n\nreturn {\n  intent: $json.intent || 'unknown',\n  entities: { \n    location: locationClean,\n    locationRaw: locationRaw\n  },\n  timeIntent,\n  message,\n  message_original: $json.message_original || message\n};"
+      },
+      "id": "extract-location-node",
+      "name": "Extract Location & Time Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.entities.location }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "check-location-node",
+      "name": "Location Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const locationAttempted = $json.entities.locationRaw || $json.message || 'không xác định';\n\nreturn {\n  sessionId: $json.sessionId,\n  intent: 'clarification_needed',\n  response: `📍 Không tìm được địa điểm từ câu \\\"${locationAttempted}\\\".\\n\\nVui lòng cung cấp rõ hơn:\\n- Tên thành phố/quận\\n- Địa danh cụ thể\\n\\nVí dụ: \\\"Hồ Hoàn Kiếm, Hà Nội\\\"`,\n  type: 'error'\n};"
+      },
+      "id": "location-empty-error-node",
+      "name": "Location Empty - Ask User",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 480]
+    },
+    {
+      "parameters": {
+        "url": "https://geocode.search.hereapi.com/v1/geocode",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.entities.location }}"
+            },
+            {
+              "name": "apiKey",
+              "value": "DyD7QbF6uEeLGB47HYJ-ixnpiuYuS_HNFVaZso01_lQ"
+            },
+            {
+              "name": "lang",
+              "value": "vi-VN"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            },
+            {
+              "name": "in",
+              "value": "countryCode:VNM"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "geocoding-node",
+      "name": "Geocoding (Text → Lat/Lng)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE HERE MAPS GEOCODING (POI-OPTIMIZED) =====\nconst prevData = $('Extract Location & Time Intent').item.json;\nconst hereData = $json;\n\nlet lat = null;\nlet lon = null;\nlet displayName = null;\nlet confidence = 'high';\nlet geocodeMethod = 'here';\nlet placeType = 'unknown';\n\n// HERE Maps response structure: { items: [ { position: {lat, lng}, address: {label}, resultType: '...' } ] }\nif (hereData.items && hereData.items.length > 0) {\n  const item = hereData.items[0];\n  \n  // Extract coordinates\n  if (item.position) {\n    lat = item.position.lat;\n    lon = item.position.lng;\n  }\n  \n  // Extract place name - use title first (for POI), fallback to address label\n  displayName = item.title || item.address?.label || null;\n  \n  // Extract result type\n  placeType = item.resultType || 'unknown';\n  \n  // Set confidence based on result type\n  // HERE resultType: houseNumber, street, locality, city, county, state, country, place (POI)\n  if (placeType === 'place') {\n    confidence = 'high'; // POI/landmark = best\n  } else if (placeType === 'locality' || placeType === 'city') {\n    confidence = 'medium'; // City/town match\n  } else if (placeType === 'houseNumber' || placeType === 'street') {\n    confidence = 'medium'; // Specific address\n  } else {\n    confidence = 'low'; // Generic area\n  }\n  \n  geocodeMethod = 'here';\n} else {\n  // Geocoding failed - enhance with Vietnam context\n  confidence = 'failed';\n  geocodeMethod = 'fallback';\n  \n  const originalLoc = prevData.entities.location;\n  const originalRaw = prevData.entities.locationRaw;\n  \n  let enhancedLocation = originalLoc || originalRaw || '';\n  \n  if (enhancedLocation && !enhancedLocation.match(/vietnam|việt nam|vn/i)) {\n    const vietnamesePatterns = [\n      'hà nội', 'hanoi', 'sài gòn', 'saigon', 'hồ chí minh',\n      'đà nẵng', 'da nang', 'hải phòng', 'cần thơ', 'huế',\n      'quận', 'phường', 'xã', 'hồ', 'chợ', 'vườn quốc gia'\n    ];\n    \n    const lowerLoc = enhancedLocation.toLowerCase();\n    const isVietnamese = vietnamesePatterns.some(p => lowerLoc.includes(p));\n    \n    if (isVietnamese) {\n      enhancedLocation = `${enhancedLocation}, Vietnam`;\n    }\n  }\n  \n  displayName = enhancedLocation;\n}\n\nreturn {\n  intent: prevData.intent,\n  entities: {\n    location: prevData.entities.location,\n    locationRaw: prevData.entities.locationRaw,\n    locationDisplay: displayName,\n    coordinates: lat && lon ? `${lat},${lon}` : null,\n    geocodeConfidence: confidence,\n    placeType: placeType\n  },\n  timeIntent: prevData.timeIntent,\n  message: prevData.message,\n  message_original: prevData.message_original\n};"      },
+      "id": "parse-geocoding-node",   
+      "name": "Parse Geocoding Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.entities.coordinates }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "check-geocoding-node",
+      "name": "Geocoding Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1750, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const locationAttempted = $json.entities.locationDisplay || $json.entities.location || 'không xác định';\n\nreturn {\n  intent: 'clarification_needed',\n  response: `📍 Không tìm thấy địa điểm \\\"${locationAttempted}\\\".\\n\\nVui lòng cung cấp thêm thông tin:\\n- Tên quận/huyện\\n- Tên thành phố\\n- Địa danh nổi tiếng gần đó\\n\\nVí dụ: \\\"Phường Kim Liên, Quận Đống Đa, Hà Nội\\\"`,\n  type: 'error'\n};"
+      },
+      "id": "geocoding-failed-node",
+      "name": "Geocoding Failed - Ask User",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1900, 650]
+    },
+    {
+      "parameters": {
+        "url": "https://api.weatherapi.com/v1/current.json",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "52c2f536877444ec8a0165526260501"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.entities.coordinates || $json.entities.location }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "timezone-resolver-node",
+      "name": "Phase 1: Timezone Resolver",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1950, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== TIME INTENT CALCULATOR (CLEAN VERSION) =====\n// ⚠️ DO NOT MODIFY: This is the SINGLE SOURCE OF TRUTH\n// Converts semantic timeIntent → weatherMode for WeatherAPI\n// AI MUST NOT calculate days or offsets\n\nconst prevData = $('Parse Geocoding Result').item.json;\nconst message = prevData.message || '';\nconst timeIntent = prevData.timeIntent || 'today';\n\n// Get timezone from WeatherAPI current response\nconst locationData = $json.location || {};\nconst localtime = locationData.localtime || new Date().toISOString().replace('T', ' ').substr(0, 16);\nconst local_date = localtime.split(' ')[0];\nconst tz = locationData.tz_id || 'UTC';\n\n// Parse local date (avoid timezone issues)\nconst [year, month, day] = local_date.split('-').map(Number);\nconst today = new Date(year, month - 1, day);\nconst wd = today.getDay(); // 0=CN, 1=T2, ..., 6=T7\n\n// ===== WEATHER MODE: STANDARDIZED FORMAT =====\n// mode: 'current' | 'forecast'\n// days: number of days to request from API (1-14)\n// offset: index of day to display (0-based)\n// label: original timeIntent for post-process filtering\n\nlet mode = 'current';\nlet days = 1;\nlet offset = 0;\nconst label = timeIntent;\n\nswitch (timeIntent) {\n  case 'today':\n    mode = 'current';\n    days = 1;\n    offset = 0;\n    break;\n\n  case 'tomorrow':\n    mode = 'forecast';\n    days = 2;\n    offset = 1;\n    break;\n\n  case 'day_after':\n    mode = 'forecast';\n    days = 3;\n    offset = 2;\n    break;\n\n  case 'day_after_next':\n    mode = 'forecast';\n    days = 4;\n    offset = 3;\n    break;\n\n  case 'n_days': {\n    const match = message.match(/(\\d+)/);\n    const n = match ? parseInt(match[1]) : 3;\n    mode = 'forecast';\n    days = Math.min(n + 1, 14);\n    offset = 0; // Show all days\n    break;\n  }\n\n  case 'few_days':\n    mode = 'forecast';\n    days = 4;\n    offset = 0;\n    break;\n\n  case 'weekend': {\n    // Calculate days until Saturday (6) and Sunday (0)\n    const daysToSat = (6 - wd + 7) % 7 || 7;\n    const daysToSun = (7 - wd) % 7 || 7;\n    days = Math.min(Math.max(daysToSat, daysToSun) + 1, 14);\n    mode = 'forecast';\n    offset = 0; // Will filter Sat/Sun in post-process\n    break;\n  }\n\n  case 'this_week': {\n    const daysToSun = wd === 0 ? 0 : (7 - wd);\n    mode = 'forecast';\n    days = Math.min(daysToSun + 1, 14);\n    offset = 0;\n    break;\n  }\n\n  case 'specific_date': {\n    // Parse DD/MM/YYYY or YYYY-MM-DD\n    const match1 = message.match(/(\\d{1,2})[\\/\\-](\\d{1,2})[\\/\\-](\\d{4})/);\n    const match2 = message.match(/(\\d{4})-(\\d{2})-(\\d{2})/);\n    \n    let targetDate = null;\n    if (match1) {\n      const [d, m, y] = [match1[1], match1[2], match1[3]].map(Number);\n      targetDate = new Date(y, m - 1, d);\n    } else if (match2) {\n      targetDate = new Date(match2[0]);\n    }\n    \n    if (targetDate) {\n      const diffDays = Math.ceil((targetDate - today) / 86400000);\n      if (diffDays <= 0) {\n        mode = 'current';\n        days = 1;\n        offset = 0;\n      } else {\n        mode = 'forecast';\n        days = Math.min(diffDays + 1, 14);\n        offset = diffDays;\n      }\n    }\n    break;\n  }\n\n  default:\n    mode = 'current';\n    days = 1;\n    offset = 0;\n}\n\nreturn {\n  intent: prevData.intent || 'unknown',\n  entities: {\n    location: prevData.entities.location,\n    locationDisplay: prevData.entities.locationDisplay,\n    coordinates: prevData.entities.coordinates,\n    // ===== STANDARDIZED weatherMode =====\n    weatherMode: { mode, days, offset, label }\n  },\n  timezone: { tz, local_date, localtime },\n  message: prevData.message,\n  message_original: prevData.message_original\n};"
+      },
+      "id": "time-calculator-node",
+      "name": "Time Intent Calculator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const intent = $json.intent || 'unknown';\nconst entities = $json.entities || {};\n\nconst requirements = {\n  get_weather: ['location'],\n  search_hotel: ['location'],\n  get_attraction_info: ['location']\n};\n\nconst required = requirements[intent] || [];\nconst missing = required.filter(f => !entities[f]);\n\nreturn {\n  ...$json,\n  has_all_fields: missing.length === 0,\n  missing_fields: missing\n};"
+      },
+      "id": "check-fields-node",
+      "name": "Check Required Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_all_fields }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-complete-node",
+      "name": "Has_All_Required_Data?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const missing = $json.missing_fields || [];\nconst fieldNames = { location: 'địa điểm', date: 'ngày' };\n\nconst question = 'Vui lòng cho biết ' + missing.map(f => fieldNames[f] || f).join(', ') + '?';\n\nreturn { response: question, type: 'clarification' };"
+      },
+      "id": "ask-again-node",
+      "name": "Hỏi lại User",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2650, 500]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "get_weather",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.entities?.weatherMode?.mode }}",
+                    "rightValue": "current",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Weather-Current"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "get_weather",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.entities?.weatherMode?.mode }}",
+                    "rightValue": "forecast",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Weather-Forecast"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "search_hotel",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Hotel"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "get_attraction_info",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Attraction"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "route-tool-node",
+      "name": "Route to Tool",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [2650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.weatherapi.com/v1/current.json",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "52c2f536877444ec8a0165526260501"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.entities.coordinates || $json.entities.location }}"
+            },
+            {
+              "name": "lang",
+              "value": "vi"
+            },
+            {
+              "name": "aqi",
+              "value": "yes"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "weather-current-node",
+      "name": "Weather Current (Today)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2850, 50]
+    },
+    {
+      "parameters": {
+        "url": "https://api.weatherapi.com/v1/forecast.json",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "52c2f536877444ec8a0165526260501"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.entities.coordinates || $json.entities.location }}"
+            },
+            {
+              "name": "days",
+              "value": "={{ $json.entities?.weatherMode?.days || 2 }}"
+            },
+            {
+              "name": "lang",
+              "value": "vi"
+            },
+            {
+              "name": "aqi",
+              "value": "yes"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "weather-forecast-node",
+      "name": "Weather Forecast (Future)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2850, 150]
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google_hotels"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.entities.location }} hotels"
+            },
+            {
+              "name": "check_in_date",
+              "value": "={{ $now.format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "check_out_date",
+              "value": "={{ $now.plus({days: 1}).format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "currency",
+              "value": "VND"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "hotel-tool-node",
+      "name": "Hotel Tool",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2650, 300],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "SERPAPI_CREDENTIAL",
+          "name": "SerpAPI Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.entities.location }} điểm tham quan du lịch"
+            },
+            {
+              "name": "hl",
+              "value": "vi"
+            },
+            {
+              "name": "gl",
+              "value": "vn"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "attraction-tool-node",
+      "name": "Attraction Tool",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2650, 500],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "SERPAPI_CREDENTIAL",
+          "name": "SerpAPI Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  intent: 'unsupported',\n  response: 'Tôi hỗ trợ: thời tiết, khách sạn, điểm tham quan. Ví dụ: \"thời tiết Hà Nội\"',\n  type: 'error'\n};"
+      },
+      "id": "unsupported-node",
+      "name": "Unsupported_Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2650, 700]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== POST-PROCESS: FORMAT RESPONSE (CLEAN VERSION) =====\n// Uses standardized weatherMode: { mode, days, offset, label }\n// ⚠️ TIMEZONE FIX: Do NOT use UTC for forecast dates\n\nconst data = $json;\nconst routeData = $('Route to Tool').item.json;\nconst intent = routeData.intent || 'unknown';\nconst weatherMode = routeData.entities?.weatherMode || {};\nconst locationDisplay = routeData.entities?.locationDisplay || routeData.entities?.location || 'N/A';\nconst coordinates = routeData.entities?.coordinates;\nconst label = weatherMode.label || 'today';\nconst offset = weatherMode.offset ?? 0;\n\nlet response = '';\n\nif (intent === 'get_weather') {\n  // ===== SMART LABELING: Add \"(gần X)\" if API anchor differs from user POI =====\n  const apiAnchor = data.location?.name;\n  let loc = locationDisplay;\n  \n  if (apiAnchor && locationDisplay && !locationDisplay.toLowerCase().includes(apiAnchor.toLowerCase())) {\n    loc = `${locationDisplay} (gần ${apiAnchor})`;\n  }\n  \n  const country = data.location?.country || '';\n  const coordInfo = coordinates ? ` [📍 ${coordinates}]` : '';\n  \n  // ===== CURRENT WEATHER (Real-time) =====\n  if (weatherMode.mode === 'current' && data.current) {\n    const current = data.current;\n    const temp = current.temp_c;\n    const feelsLike = current.feelslike_c;\n    const condition = current.condition?.text || '';\n    const humidity = current.humidity || 0;\n    const wind = current.wind_kph || 0;\n    const lastUpdated = current.last_updated || '';\n    \n    response = `🌤️ **${loc}** (${country})${coordInfo}\\n` +\n               `🕒 Cập nhật: ${lastUpdated}\\n` +\n               `🌡️ Nhiệt độ: ${temp}°C (cảm giác ${feelsLike}°C)\\n` +\n               `☁️ ${condition}\\n` +\n               `💧 Độ ẩm: ${humidity}% | 💨 Gió: ${wind} km/h`;\n               \n  } else {\n    // ===== FORECAST WEATHER =====\n    const forecastDays = data.forecast?.forecastday || [];\n    \n    if (forecastDays.length === 0) {\n      response = `❌ Không lấy được dữ liệu thời tiết cho \"${loc}\"`;\n    } else {\n      let displayDays = forecastDays;\n      \n      // ===== FILTER BY LABEL (using standardized offset) =====\n      if (['today', 'tomorrow', 'day_after', 'day_after_next', 'specific_date'].includes(label)) {\n        // Single day: use offset directly\n        const idx = Math.min(offset, forecastDays.length - 1);\n        displayDays = [forecastDays[idx]];\n        \n      } else if (label === 'weekend') {\n        // Weekend: filter Saturday (6) + Sunday (0)\n        // ⚠️ FIX: Parse date WITHOUT UTC to avoid timezone shift\n        displayDays = forecastDays.filter(d => {\n          const [y, m, dd] = d.date.split('-').map(Number);\n          const dateObj = new Date(y, m - 1, dd);\n          const wd = dateObj.getDay();\n          return wd === 6 || wd === 0;\n        });\n        if (displayDays.length === 0) displayDays = forecastDays;\n      }\n      // n_days, few_days, this_week: show all fetched days\n      \n      // ===== FORMAT RESPONSE =====\n      if (displayDays.length === 1) {\n        // Single day format\n        const day = displayDays[0];\n        const temp = day.day.avgtemp_c;\n        const minMax = `${day.day.mintemp_c}°→${day.day.maxtemp_c}°C`;\n        const condition = day.day.condition?.text || '';\n        const rain = day.day.daily_chance_of_rain || 0;\n        const wind = day.day.maxwind_kph || 0;\n        \n        response = `🌤️ **${loc}** (${country})${coordInfo}\\n` +\n                   `📅 ${day.date}: ${temp}°C (${minMax})\\n` +\n                   `☁️ ${condition}\\n` +\n                   `💧 Mưa: ${rain}% | 💨 Gió: ${wind} km/h`;\n                   \n      } else {\n        // Multiple days format\n        const dayLabels = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];\n        const dayLines = displayDays.map(d => {\n          // ⚠️ FIX: Parse WITHOUT UTC\n          const [y, m, dd] = d.date.split('-').map(Number);\n          const dateObj = new Date(y, m - 1, dd);\n          const wd = dateObj.getDay();\n          const dayLabel = dayLabels[wd];\n          const shortDate = d.date.substring(5);\n          const condition = d.day.condition?.text || '';\n          const temp = `${d.day.mintemp_c}°→${d.day.maxtemp_c}°C`;\n          const rain = d.day.daily_chance_of_rain || 0;\n          \n          return `📅 **${dayLabel}** (${shortDate}): ${condition}, ${temp}, 💧${rain}%`;\n        }).join('\\n');\n        \n        const dateRange = `${displayDays[0].date} → ${displayDays[displayDays.length-1].date}`;\n        response = `🌤️ **${loc}** (${country})${coordInfo}\\n${dateRange}\\n\\n${dayLines}`;\n      }\n    }\n  }\n  \n} else if (intent === 'search_hotel') {\n  const hotels = data.properties || [];\n  if (hotels.length === 0) {\n    response = '🏨 Không tìm thấy khách sạn';\n  } else {\n    const hotelList = hotels.slice(0, 5).map((h, i) => {\n      const name = h.name || 'N/A';\n      const price = h.rate_per_night?.lowest || 'N/A';\n      const rating = h.overall_rating ? `⭐${h.overall_rating}` : '';\n      return `${i+1}. **${name}** - ${price} ${rating}`;\n    }).join('\\n');\n    response = `🏨 **Khách sạn** tại ${locationDisplay}:\\n\\n${hotelList}`;\n  }\n  \n} else if (intent === 'get_attraction_info') {\n  const results = data.organic_results || [];\n  if (results.length === 0) {\n    response = '🏛️ Không tìm thấy điểm tham quan';\n  } else {\n    const attractionList = results.slice(0, 5).map((r, i) => {\n      const title = r.title || 'N/A';\n      const snippet = r.snippet ? ` - ${r.snippet.substring(0, 80)}...` : '';\n      return `${i+1}. **${title}**${snippet}`;\n    }).join('\\n');\n    response = `🏛️ **Điểm tham quan** tại ${locationDisplay}:\\n\\n${attractionList}`;\n  }\n  \n} else {\n  response = data.response || 'Không thể xử lý yêu cầu.';\n}\n\nreturn {\n  intent,\n  response,\n  type: 'success',\n  metadata: {\n    location: locationDisplay,\n    coordinates: coordinates || null,\n    weatherMode: weatherMode\n  }\n};"
+      },
+      "id": "postprocess-node",
+      "name": "Post-Process",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3050, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "final-response-node",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3250, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract SessionId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract SessionId": {
+      "main": [
+        [
+          {
+            "node": "Memory: Get Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Memory: Get Session": {
+      "main": [
+        [
+          {
+            "node": "Parse Memory Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Memory Response": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Rule-Based Intent + Context Merge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Validation_Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validation_Error": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rule-Based Intent + Context Merge": {
+      "main": [
+        [
+          {
+            "node": "Prepare Session Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Session Context": {
+      "main": [
+        [
+          {
+            "node": "Memory: Save Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Memory: Save Session": {
+      "main": [
+        [
+          {
+            "node": "Pass Through Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Through Data": {
+      "main": [
+        [
+          {
+            "node": "AI Fallback Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Fallback Check": {
+      "main": [
+        [
+          {
+            "node": "AI Agent (Fallback ONLY)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Location & Time Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent (Fallback ONLY)": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [
+          {
+            "node": "Extract Location & Time Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Location & Time Intent": {
+      "main": [
+        [
+          {
+            "node": "Location Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Location Valid?": {
+      "main": [
+        [
+          {
+            "node": "Geocoding (Text → Lat/Lng)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Location Empty - Ask User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Location Empty - Ask User": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Geocoding (Text → Lat/Lng)": {
+      "main": [
+        [
+          {
+            "node": "Parse Geocoding Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Geocoding Result": {
+      "main": [
+        [
+          {
+            "node": "Geocoding Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Geocoding Success?": {
+      "main": [
+        [
+          {
+            "node": "Phase 1: Timezone Resolver",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Geocoding Failed - Ask User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Geocoding Failed - Ask User": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Phase 1: Timezone Resolver": {
+      "main": [
+        [
+          {
+            "node": "Time Intent Calculator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Time Intent Calculator": {
+      "main": [
+        [
+          {
+            "node": "Check Required Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Required Fields": {
+      "main": [
+        [
+          {
+            "node": "Has_All_Required_Data?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has_All_Required_Data?": {
+      "main": [
+        [
+          {
+            "node": "Route to Tool",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hỏi lại User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hỏi lại User": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route to Tool": {
+      "main": [
+        [
+          {
+            "node": "Weather Current (Today)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Weather Forecast (Future)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hotel Tool",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Attraction Tool",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unsupported_Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weather Current (Today)": {
+      "main": [
+        [
+          {
+            "node": "Post-Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weather Forecast (Future)": {
+      "main": [
+        [
+          {
+            "node": "Post-Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hotel Tool": {
+      "main": [
+        [
+          {
+            "node": "Post-Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attraction Tool": {
+      "main": [
+        [
+          {
+            "node": "Post-Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unsupported_Handler": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post-Process": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v2"
+  },
+  "versionId": "simple-hybrid-v2-pro",
+  "meta": {
+    "instanceId": "simple-hybrid-architecture"
+  },
+  "id": "HybridTravelAssistantSimple",
+  "tags": [
+    {
+      "name": "hybrid"
+    },
+    {
+      "name": "pro-standard"
+    }
+  ]
+}
