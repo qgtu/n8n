@@ -91,6 +91,1713 @@
     },
     {
       "parameters": {
+        "jsCode": "// ===== CHECK REQUIRED SLOTS (STRICT, NO GUESS) =====\n// Mission: Check dữ liệu có sẵn - KHÔNG tạo default\n// ⚡ AGODA-STYLE: Location = placeName HOẶC userLocation (chưa cần lat/lng)\n\nconst data = $json;\nconst message = data.messageLower || '';\nconst intent = data.intent || 'UNKNOWN';\n\n// ✅ LUÔN ĐỌC TỪ $json\nconst userLocation = data.userLocation || null;\n\n// ---- CHECK PLACE NAME (explicit text) ----\nconst hasPlaceName =\n  message.includes('đền') ||\n  message.includes('chùa') ||\n  message.includes('nhà thờ') ||\n  message.includes('bảo tàng') ||\n  message.includes('lăng') ||\n  message.includes('hồ ') ||\n  message.includes('núi ') ||\n  message.includes('biển');\n\n// ---- CHECK LOCATION HINT (city/area names) ----\nconst hasLocationHint =\n  message.includes('ở ') ||\n  message.includes('tại ') ||\n  message.includes('gần ') ||\n  message.includes('quanh ') ||\n  message.includes('xung quanh ') ||\n  message.includes('khu vực ') ||\n  message.includes('hà nội') ||\n  message.includes('sài gòn') ||\n  message.includes('đà nẵng') ||\n  message.includes('ninh bình');\n\n// ---- CHECK \"GẦN TÔI\" ----\nconst isNearMe =\n  message.includes('gần tôi') ||\n  message.includes('quanh tôi') ||\n  message.includes('xung quanh tôi') ||\n  message.includes('gần đây');\n\n// ---- CHECK USER LOCATION AVAILABLE ----\nconst hasUserLocation = !!(userLocation && userLocation.lat && userLocation.lng);\n\n// ---- CHECK TIME ----\nconst hasTimeHint =\n  message.includes('hôm nay') ||\n  message.includes('cuối tuần') ||\n  message.includes('ngày mai') ||\n  message.includes('tuần này');\n\n// ---- CHECK TOUR DURATION ----\nconst durationMatch = message.match(/(\\d+)\\s*ngày/);\nconst tourDuration = durationMatch ? parseInt(durationMatch[1]) : null;\n\n// ---- SLOT VALIDATION - AGODA LOGIC ----\nlet missingSlots = [];\nlet needClarification = false;\n\n// 🔥 SEARCH_POI / SEARCH_NEARBY - Chấp nhận place name HOẶC userLocation HOẶC isNearMe\nif (intent === 'SEARCH_POI' || intent === 'SEARCH_NEARBY') {\n  // ✅ Có ít nhất 1 trong 4 nguồn location là HỢP LỆ:\n  // 1. Place name (\"Hồ Gươm\", \"Đền Thái Vi\")\n  // 2. Location hint (\"gần Hà Nội\", \"ở Đà Nẵng\")\n  // 3. User location (lat/lng từ device)\n  // 4. \"Gần tôi\" (sẽ xin quyền sau)\n  const hasAnyLocationSource = hasPlaceName || hasLocationHint || hasUserLocation || isNearMe;\n  \n  if (!hasAnyLocationSource) {\n    missingSlots.push('location');\n    needClarification = true;\n  } else {\n    // ✅ Có nguồn location → workflow tiếp tục\n    needClarification = false;\n  }\n}\n// GET_PLACE_INFO - Chỉ cần place name\nelse if (intent === 'GET_PLACE_INFO') {\n  if (!hasPlaceName) {\n    missingSlots.push('placeName');\n    needClarification = true;\n  }\n}\n// GET_WEATHER - Cần location hint\nelse if (intent === 'GET_WEATHER') {\n  if (!hasLocationHint && !hasPlaceName) {\n    missingSlots.push('location');\n    needClarification = true;\n  }\n}\n// SEARCH_HOTEL - Cần location hint\nelse if (intent === 'SEARCH_HOTEL') {\n  if (!hasLocationHint) {\n    missingSlots.push('location');\n    needClarification = true;\n  }\n}\n// SEARCH_TOUR - Cần duration\nelse if (intent === 'SEARCH_TOUR') {\n  if (!tourDuration) {\n    missingSlots.push('duration');\n    needClarification = true;\n  }\n}\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  messageLower: data.messageLower,\n  userLocation: data.userLocation,\n  intent: data.intent,\n  confidence: data.confidence,\n  hasLocationHint,\n  isNearMe,\n  hasUserLocation,\n  hasPlaceName,\n  hasTimeHint,\n  tourDuration,\n  missingSlots,\n  needClarification\n};"
+      },
+      "id": "6661cacf-8468-4fc4-a8c7-2194fee08157",
+      "name": "Fn_CheckRequiredSlots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        57696,
+        68304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.needClarification }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "78a1e412-7eed-4b7e-9471-7f72c8f92e3c",
+      "name": "IF_NeedIntentClarification",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        57920,
+        68304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== GUIDE USER (AGODA-STYLE) =====\n// Mission: Xoay user về hướng rõ ràng - KHÔNG hỏi mơ hồ\n\nreturn {\n  response: 'Bạn đang muốn:\\n\\n📍 Xem thông tin địa điểm (giá vé, giờ mở cửa)\\n🏞️ Tìm địa điểm du lịch\\n🏚️ Tìm khách sạn\\n🧳 Tìm tour trọn gói\\n🌦️ Xem thời tiết\\n📍 Tìm điểm gần tôi\\n\\nVí dụ: \"Thông tin đền Thái Vi\" hoặc \"Tìm 3 điểm du lịch gần tôi\"',\n  type: 'guide_user'\n};"
+      },
+      "id": "75036388-2e81-49ee-ae1a-652ee1c16f20",
+      "name": "Respond_ClarifyIntent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        69008
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_NEARBY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Nearby"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_TOUR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Tour"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_PLACE_INFO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "PlaceInfo"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "switch-special-intent",
+      "name": "Switch_SpecialIntent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        58144,
+        68208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasUserLocation }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-nearby-no-location",
+      "name": "IF_Nearby_NoLocation",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        58368,
+        67904
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  response: '📍 Để tìm địa điểm gần bạn, vui lòng cho phép truy cập vị trí của bạn.\\n\\nBạn có thể:\\n1. Bật định vị trên thiết bị\\n2. Hoặc cho biết khu vực bạn đang ở (VD: \"Quận 1 Sài Gòn\")',\n  type: 'request_location_permission',\n  require_location: true\n};"
+      },
+      "id": "respond-request-location",
+      "name": "Respond_RequestLocation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        67712
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== BUILD NEARBY SEARCH (AGODA-STYLE) =====\n// Mission: Xây dựng query tìm kiếm theo tọa độ user\n// ⚡ CHỈ ở ĐÂY mới fallback default coords (SAU KHI biết intent)\n\nconst data = $json;\n\n// Fallback default coords nếu client không gửi\nconst finalUserLocation = (!data.userLocation || !data.userLocation.lat || !data.userLocation.lng) \n  ? { lat: 21.0285, lng: 105.8542, source: 'device-default' }\n  : data.userLocation;\n\nconst lat = finalUserLocation.lat;\nconst lng = finalUserLocation.lng;\n\n// Xác định loại địa điểm từ message\nconst msg = data.messageLower;\nlet poiType = 'địa điểm du lịch';\n\nif (msg.includes('ăn') || msg.includes('quán') || msg.includes('nhà hàng')) {\n  poiType = 'nhà hàng quán ăn';\n} else if (msg.includes('cafe') || msg.includes('cà phê')) {\n  poiType = 'quán cafe';\n} else if (msg.includes('khách sạn') || msg.includes('hotel')) {\n  poiType = 'khách sạn';\n}\n\n// Extract số lượng nếu có\nconst countMatch = msg.match(/(\\d+)\\s*(?:điểm|chỗ|nơi|địa điểm)/);\nconst requestedCount = countMatch ? parseInt(countMatch[1]) : 5;\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  intent: 'SEARCH_NEARBY',\n  userLocation: finalUserLocation,\n  coordinates: `${lat},${lng}`,\n  searchQuery: `${poiType} gần ${lat},${lng}`,\n  poiType,\n  requestedCount: Math.min(requestedCount, 10)\n};"
+      },
+      "id": "fn-build-nearby-search",
+      "name": "Fn_BuildNearbySearch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58592,
+        67808
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google_maps"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.poiType }}"
+            },
+            {
+              "name": "ll",
+              "value": "=@{{ $json.userLocation.lat }},{{ $json.userLocation.lng }},15z"
+            },
+            {
+              "name": "hl",
+              "value": "vi"
+            },
+            {
+              "name": "type",
+              "value": "search"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "http-search-nearby",
+      "name": "HTTP_SearchNearby",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        58816,
+        67808
+      ],
+      "credentials": {
+        "serpApi": {
+          "id": "vD3y3KChuLVK1OPF",
+          "name": "SerpAPI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT NEARBY RESULTS =====\nconst prevData = $('Fn_BuildNearbySearch').item.json;\nconst apiData = $json;\n\nconst results = apiData.local_results || [];\nconst requestedCount = prevData.requestedCount || 5;\n\nif (results.length === 0) {\n  return {\n    intent: 'SEARCH_NEARBY',\n    nearby_raw: [],\n    location: 'vị trí của bạn',\n    poiType: prevData.poiType,\n    has_results: false\n  };\n}\n\nconst nearby_raw = results.slice(0, requestedCount).map((p, idx) => ({\n  rank: idx + 1,\n  name: p.title || 'N/A',\n  address: p.address || null,\n  rating: p.rating || null,\n  reviews: p.reviews || null,\n  type: p.type || prevData.poiType,\n  distance: p.distance || null\n}));\n\nreturn {\n  intent: 'SEARCH_NEARBY',\n  nearby_raw,\n  location: 'vị trí của bạn',\n  poiType: prevData.poiType,\n  requestedCount,\n  has_results: true\n};"
+      },
+      "id": "fn-format-nearby",
+      "name": "Fn_FormatNearby",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59040,
+        67808
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE TOUR DURATION =====\n// Mission: Extract số ngày và location cho tour\n\nconst data = $json;\nconst msg = data.messageLower;\n\n// Extract duration\nlet duration = data.tourDuration || 3; // default 3 ngày\n\n// Extract location nếu có\nlet tourLocation = null;\nconst locationMatch = msg.match(/(?:ở|tại|đi|tour)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+\\d+|$)/i);\nif (locationMatch) {\n  tourLocation = locationMatch[1].trim();\n}\n\n// Fallback: tìm city names\nif (!tourLocation) {\n  const cities = ['hà nội', 'sài gòn', 'đà nẵng', 'huế', 'nha trang', 'phú quốc', 'hội an', 'đà lạt', 'sapa', 'hạ long', 'ninh bình', 'miền bắc', 'miền trung', 'miền nam', 'việt nam'];\n  const found = cities.find(c => msg.includes(c));\n  if (found) tourLocation = found;\n}\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  intent: 'SEARCH_TOUR',\n  tourDuration: duration,\n  tourLocation,\n  hasLocation: !!tourLocation\n};"
+      },
+      "id": "fn-parse-tour-duration",
+      "name": "Fn_ParseTourDuration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58368,
+        68112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasLocation }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-tour-no-location",
+      "name": "IF_Tour_NoLocation",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        58592,
+        68112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const duration = $json.tourDuration || '';\nreturn {\n  response: `📍 Bạn muốn tìm tour ${duration} ngày ở đâu?\\n\\nVí dụ: Đà Nẵng, Phú Quốc, Sapa, Hạ Long...`,\n  type: 'clarify_tour_location'\n};"
+      },
+      "id": "respond-clarify-tour-location",
+      "name": "Respond_ClarifyTourLocation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        67904
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google"
+            },
+            {
+              "name": "q",
+              "value": "=tour {{ $json.tourDuration }} ngày {{ $json.tourLocation }} giá"
+            },
+            {
+              "name": "hl",
+              "value": "vi"
+            },
+            {
+              "name": "gl",
+              "value": "vn"
+            },
+            {
+              "name": "num",
+              "value": "5"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "http-search-tour",
+      "name": "HTTP_SearchTour",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        58816,
+        68208
+      ],
+      "credentials": {
+        "serpApi": {
+          "id": "vD3y3KChuLVK1OPF",
+          "name": "SerpAPI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT TOUR RESULTS =====\nconst prevData = $('Fn_ParseTourDuration').item.json;\nconst apiData = $json;\n\nconst results = apiData.organic_results || [];\n\nif (results.length === 0) {\n  return {\n    intent: 'SEARCH_TOUR',\n    tours_raw: [],\n    location: prevData.tourLocation,\n    duration: prevData.tourDuration,\n    has_results: false\n  };\n}\n\nconst tours_raw = results.slice(0, 5).map(t => ({\n  title: t.title || 'N/A',\n  snippet: t.snippet || null,\n  source: t.link || null,\n  provider: t.displayed_link || null\n}));\n\nreturn {\n  intent: 'SEARCH_TOUR',\n  tours_raw,\n  location: prevData.tourLocation,\n  duration: prevData.tourDuration,\n  has_results: true\n};"
+      },
+      "id": "fn-format-tour",
+      "name": "Fn_FormatTour",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59040,
+        68208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasPlaceName }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-placeinfo-no-placename",
+      "name": "IF_PlaceInfo_NoPlaceName",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        58368,
+        68304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  response: '📍 Bạn muốn xem thông tin địa điểm nào?\\n\\nVí dụ:\\n• Đền Thái Vi\\n• Chùa Bái Đính\\n• Lăng Bác Hồ\\n• Hồ Hoàn Kiếm',\n  type: 'clarify_place_name'\n};"
+      },
+      "id": "respond-clarify-placename",
+      "name": "Respond_ClarifyPlaceName",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        68112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== RESOLVE PLACE NAME =====\n// Mission: Extract place name từ message cho GET_PLACE_INFO\n// Khác với location, placeName không cần geocode\n\nconst data = $json;\nconst msg = data.messageLower || '';\nlet placeName = null;\n\n// Strategy 1: Place type keywords (đền, chùa, lăng...)\nconst placeMatch = msg.match(/(?:đền|chùa|lăng|miếu|hồ|núi|bãi biển|công viên|bảo tàng|di tích|khu)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+giá|\\s+giờ|\\s+thông|\\s+cuối|\\s+hôm|\\s+\\?|$)/i);\nif (placeMatch) {\n  // Get full match and clean\n  placeName = placeMatch[0].replace(/giá|giờ|thông.*$|cuối.*$|hôm.*$|\\?/gi, '').trim();\n}\n\n// Strategy 2: Reversed pattern (\"Thái Vi đền\")\nif (!placeName) {\n  const reversedMatch = msg.match(/([\\wÀ-ỹ]+)\\s+(?:đền|chùa|lăng|miếu)/i);\n  if (reversedMatch) {\n    placeName = reversedMatch[0].trim();\n  }\n}\n\n// Strategy 3: Famous landmarks\nif (!placeName) {\n  const landmarks = ['hồ hoàn kiếm', 'hồ gươm', 'lăng bác', 'chùa một cột', 'chùa bái đính', 'tràng an', 'tam cốc', 'vịnh hạ long', 'động phong nha'];\n  const found = landmarks.find(l => msg.includes(l));\n  if (found) {\n    placeName = found;\n  }\n}\n\n// Strategy 4: Remove noise words and use what's left\nif (!placeName) {\n  const noiseWords = ['thông tin', 'giá vé', 'giờ mở cửa', 'xem', 'cho biết', 'tôi', 'muốn', 'cuối tuần'];\n  let cleaned = msg;\n  for (const noise of noiseWords) {\n    cleaned = cleaned.replace(new RegExp(`\\\\s*${noise}\\\\s*`, 'gi'), ' ');\n  }\n  cleaned = cleaned.trim();\n  if (cleaned.length >= 3) {\n    placeName = cleaned;\n  }\n}\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  intent: 'GET_PLACE_INFO',\n  placeName,\n  locationDisplay: placeName\n};"
+      },
+      "id": "fn-resolve-placename",
+      "name": "Fn_ResolvePlaceName",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58592,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasLocationHint }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "2c3deda8-90b2-40d9-8d47-0853896dfa4d",
+      "name": "IF_NeedLocationClarification",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        58368,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const intent = $json.intent;\nlet question = '';\n\nif (intent === 'SEARCH_POI') {\n  question = '📍 Bạn muốn tìm địa điểm du lịch ở đâu?\\n\\nVí dụ:\\n• Hà Nội\\n• Ninh Bình\\n• Sài Gòn\\n• Đà Nẵng';\n} else if (intent === 'GET_WEATHER') {\n  question = '🌦️ Bạn muốn xem thời tiết ở đâu?\\n\\nVí dụ:\\n• Hà Nội\\n• Ninh Bình\\n• Đà Nẵng';\n} else if (intent === 'SEARCH_HOTEL') {\n  question = '🏚️ Bạn muốn tìm khách sạn ở đâu?\\n\\nVí dụ:\\n• Hà Nội\\n• Ninh Bình\\n• Quận 1 Sài Gòn';\n} else {\n  question = '📍 Bạn có thể cho biết địa điểm cụ thể không?\\n\\nVí dụ: Hà Nội, Ninh Bình, Đà Nẵng...';\n}\n\nreturn {\n  response: question,\n  type: 'clarify_location'\n};"
+      },
+      "id": "4d688a01-03dc-4f31-ba03-3e1873cc3868",
+      "name": "Respond_ClarifyLocation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        68624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== EXTRACT LOCATION =====\n// Mission: Extract location từ message\n\nconst message = $json.messageLower || '';\nconst intent = $json.intent;\nlet locationRaw = null;\n\n// Strategy 1: After location keywords\nconst matchAfter = message.match(/(?:ở|tại|gần|quanh|xung quanh)\\s+([^,?.!]+)/i);\nif (matchAfter) {\n  locationRaw = matchAfter[1].trim();\n}\n\n// Strategy 2: Place names (đền, chùa, lăng...)\nif (!locationRaw && intent === 'GET_PLACE_INFO') {\n  const placeMatch = message.match(/(?:đền|chùa|lăng|miếu|hồ|núi|bãi|công viên|bảo tàng)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+giá|\\s+giờ|\\s+thông|$)/i);\n  if (placeMatch) {\n    locationRaw = placeMatch[0].replace(/giá|giờ|thông.*$/i, '').trim();\n  }\n  \n  // Try reversed pattern: \"Thái Vi đền\"\n  if (!locationRaw) {\n    const reversedMatch = message.match(/([\\wÀ-ỹ]+)\\s+(?:đền|chùa|lăng|miếu)/i);\n    if (reversedMatch) {\n      locationRaw = reversedMatch[0].trim();\n    }\n  }\n}\n\n// Strategy 3: Common city names\nif (!locationRaw) {\n  const cities = ['hà nội', 'hanoi', 'sài gòn', 'saigon', 'hồ chí minh', 'đà nẵng', 'da nang', 'huế', 'hue', 'nha trang', 'phú quốc', 'hội an', 'đà lạt', 'sapa', 'hạ long', 'ninh bình'];\n  const found = cities.find(c => message.includes(c));\n  if (found) {\n    locationRaw = found;\n  }\n}\n\n// Strategy 4: Remove noise words\nif (!locationRaw) {\n  const noiseWords = ['tìm', 'địa điểm', 'du lịch', 'thời tiết', 'khách sạn', 'hotel', 'weather', 'xem', 'tham quan', 'thông tin', 'giá vé', 'giờ mở cửa'];\n  let cleaned = message;\n  for (const noise of noiseWords) {\n    cleaned = cleaned.replace(new RegExp(`\\\\s*${noise}\\\\s*`, 'gi'), ' ');\n  }\n  cleaned = cleaned.trim();\n  if (cleaned.length >= 3) {\n    locationRaw = cleaned;\n  }\n}\n\nreturn {\n  sessionId: $json.sessionId,\n  message: $json.message,\n  intent: $json.intent,\n  location: locationRaw\n};"
+      },
+      "id": "a394e134-30f7-4b83-b444-d5a928b0eb28",
+      "name": "Fn_ExtractLocation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58592,
+        68496
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.location }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "6b174c18-a629-4546-a47c-3896f3ffdc8f",
+      "name": "IF_LocationValid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        58816,
+        68496
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  response: '❌ Không thể xác định địa điểm.\\n\\nVui lòng cung cấp rõ hơn, ví dụ:\\n- Hà Nội\\n- Đền Thái Vi\\n- Quận 1, Sài Gòn',\n  type: 'error'\n};"
+      },
+      "id": "1607049d-25fe-40d2-8d81-6ae1489fe4e7",
+      "name": "Respond_LocationInvalid",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        68816
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://geocode.search.hereapi.com/v1/geocode",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.location }}"
+            },
+            {
+              "name": "apiKey",
+              "value": "DyD7QbF6uEeLGB47HYJ-ixnpiuYuS_HNFVaZso01_lQ"
+            },
+            {
+              "name": "lang",
+              "value": "vi-VN"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            },
+            {
+              "name": "in",
+              "value": "countryCode:VNM"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "806ae408-3190-4e59-9a65-dcd8facb0895",
+      "name": "HTTP_Geocode",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59040,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE GEOCODING =====\nconst prevData = $('Fn_ExtractLocation').item.json;\nconst geoData = $json;\n\nlet coordinates = null;\nlet displayName = null;\n\nif (geoData.items && geoData.items.length > 0) {\n  const item = geoData.items[0];\n  if (item.position) {\n    const lat = item.position.lat;\n    const lon = item.position.lng;\n    coordinates = `${lat},${lon}`;\n  }\n  displayName = item.title || item.address?.label || prevData.location;\n} else {\n  displayName = prevData.location;\n}\n\nreturn {\n  sessionId: prevData.sessionId,\n  message: prevData.message,\n  intent: prevData.intent,\n  location: prevData.location,\n  locationDisplay: displayName,\n  coordinates\n};"
+      },
+      "id": "0ff38a7e-07e4-4890-afcb-b6139dd74ee5",
+      "name": "Fn_ParseGeocode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59264,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.coordinates }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "70536312-8e87-4d32-b301-0d8f5413af13",
+      "name": "IF_GeocodeSuccess",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        59488,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  response: '❌ Không tìm thấy địa điểm \"' + $json.location + '\".\\n\\nVui lòng thử lại với tên khác hoặc cung cấp thêm thông tin (quận/huyện/thành phố).',\n  type: 'geocode_failed'\n};"
+      },
+      "id": "560a2e50-2aaf-4cdc-9f61-2284cce524a1",
+      "name": "Respond_GeocodeFailed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        68432
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_POI",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "POI"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_WEATHER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Weather"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_HOTEL",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Hotel"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_PLACE_INFO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "PlaceInfo"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "f8548ae8-94b7-4444-bf78-106ed6fb9af4",
+      "name": "Switch_RouteToAPI",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        59712,
+        68208
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.locationDisplay }} điểm tham quan du lịch"
+            },
+            {
+              "name": "hl",
+              "value": "vi"
+            },
+            {
+              "name": "gl",
+              "value": "vn"
+            },
+            {
+              "name": "num",
+              "value": "5"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "e8527309-6d6e-408d-af81-ba96205b257f",
+      "name": "HTTP_SearchPOI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59936,
+        67904
+      ],
+      "credentials": {
+        "serpApi": {
+          "id": "vD3y3KChuLVK1OPF",
+          "name": "SerpAPI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.weatherapi.com/v1/current.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "52c2f536877444ec8a0165526260501"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.coordinates || $json.location }}"
+            },
+            {
+              "name": "lang",
+              "value": "vi"
+            },
+            {
+              "name": "aqi",
+              "value": "yes"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "cba5b795-a0ab-4259-a4af-ccafb8ee1caf",
+      "name": "HTTP_GetWeather",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59936,
+        68096
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google_hotels"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.locationDisplay }} hotels"
+            },
+            {
+              "name": "check_in_date",
+              "value": "={{ $now.format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "check_out_date",
+              "value": "={{ $now.plus({days: 1}).format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "currency",
+              "value": "VND"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "6110ff85-c776-413d-a9a5-262e39153206",
+      "name": "HTTP_SearchHotel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59936,
+        68288
+      ],
+      "credentials": {
+        "serpApi": {
+          "id": "vD3y3KChuLVK1OPF",
+          "name": "SerpAPI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.locationDisplay }} giá vé giờ mở cửa thông tin"
+            },
+            {
+              "name": "hl",
+              "value": "vi"
+            },
+            {
+              "name": "gl",
+              "value": "vn"
+            },
+            {
+              "name": "num",
+              "value": "5"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "http-search-place-info",
+      "name": "HTTP_SearchPlaceInfo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59936,
+        68480
+      ],
+      "credentials": {
+        "serpApi": {
+          "id": "vD3y3KChuLVK1OPF",
+          "name": "SerpAPI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT POI RESULTS (AGODA-STYLE) =====\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy - dùng data từ Fn_ParseGeocode\nconst geocodeData = $('Fn_ParseGeocode').item.json;\nconst apiData = $json;\n\nconst results = apiData.organic_results || [];\n\nif (results.length === 0) {\n  return {\n    intent: 'SEARCH_POI',\n    poi_raw: [],\n    location: geocodeData.locationDisplay,\n    has_results: false\n  };\n}\n\nconst poi_raw = results.slice(0, 5).map(p => ({\n  name: p.title || 'N/A',\n  source: p.link || null,\n  short_fact: p.snippet || null\n}));\n\nreturn {\n  intent: 'SEARCH_POI',\n  poi_raw,\n  location: geocodeData.locationDisplay,\n  has_results: true\n};"
+      },
+      "id": "bd6b8407-7cd8-4982-84cc-ce2a87573e1e",
+      "name": "Fn_FormatPOI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60160,
+        67904
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT WEATHER RESULTS (AGODA-STYLE) =====\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy\nconst geocodeData = $('Fn_ParseGeocode').item.json;\nconst apiData = $json;\n\nif (!apiData.current) {\n  return {\n    intent: 'GET_WEATHER',\n    weather_raw: null,\n    location: geocodeData.locationDisplay,\n    has_results: false\n  };\n}\n\nconst current = apiData.current;\n\nconst weather_raw = {\n  temp_c: current.temp_c,\n  feelslike_c: current.feelslike_c,\n  condition: current.condition?.text || '',\n  humidity: current.humidity || 0,\n  wind_kph: current.wind_kph || 0,\n  last_updated: current.last_updated || ''\n};\n\nreturn {\n  intent: 'GET_WEATHER',\n  weather_raw,\n  location: geocodeData.locationDisplay,\n  has_results: true\n};"
+      },
+      "id": "83122bb9-7642-43d0-ac79-2f4e8af4b9d1",
+      "name": "Fn_FormatWeather",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60160,
+        68096
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT HOTEL RESULTS (AGODA-STYLE) =====\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy\nconst geocodeData = $('Fn_ParseGeocode').item.json;\nconst apiData = $json;\n\nconst hotels = apiData.properties || [];\n\nif (hotels.length === 0) {\n  return {\n    intent: 'SEARCH_HOTEL',\n    hotels_raw: [],\n    location: geocodeData.locationDisplay,\n    has_results: false\n  };\n}\n\nconst hotels_raw = hotels.slice(0, 5).map(h => ({\n  name: h.name || 'N/A',\n  price: h.rate_per_night?.lowest || null,\n  rating: h.overall_rating || null,\n  description: h.description || null\n}));\n\nreturn {\n  intent: 'SEARCH_HOTEL',\n  hotels_raw,\n  location: geocodeData.locationDisplay,\n  has_results: true\n};"
+      },
+      "id": "9d281c1c-5090-4fcc-9260-d88cc269b7ae",
+      "name": "Fn_FormatHotel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60160,
+        68288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT PLACE INFO RESULTS (AGODA-STYLE) =====\n// Mission: Extract giá vé, giờ mở cửa từ search results\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy - dùng data từ Fn_ResolvePlaceName\n\nconst placeData = $('Fn_ResolvePlaceName').item.json;\nconst apiData = $json;\n\nconst results = apiData.organic_results || [];\nconst knowledgeGraph = apiData.knowledge_graph || {};\n\n// Structured place info\nconst place_info = {\n  name: placeData.placeName || placeData.locationDisplay,\n  description: null,\n  ticket_price: null,\n  opening_hours: null,\n  address: null,\n  note_if_unknown: null\n};\n\n// Try knowledge graph first\nif (knowledgeGraph.title) {\n  place_info.description = knowledgeGraph.description || null;\n  place_info.address = knowledgeGraph.address || null;\n  // Opening hours from KG\n  if (knowledgeGraph.hours) {\n    place_info.opening_hours = typeof knowledgeGraph.hours === 'string' \n      ? knowledgeGraph.hours \n      : JSON.stringify(knowledgeGraph.hours);\n  }\n}\n\n// Extract from snippets\nfor (const r of results) {\n  const snippet = (r.snippet || '').toLowerCase();\n  \n  // Look for ticket price\n  const priceMatch = snippet.match(/(\\d+[.,]?\\d*)\\s*(đ|vnđ|đồng|k|nghìn|triệu)/i);\n  if (priceMatch && !place_info.ticket_price) {\n    place_info.ticket_price = priceMatch[0];\n  }\n  \n  // Look for opening hours\n  const hoursMatch = snippet.match(/(\\d{1,2}[h:]\\d{0,2}\\s*-\\s*\\d{1,2}[h:]\\d{0,2}|mở cửa[^.]+)/i);\n  if (hoursMatch && !place_info.opening_hours) {\n    place_info.opening_hours = hoursMatch[0];\n  }\n  \n  // Get description if not set\n  if (!place_info.description && r.snippet && r.snippet.length > 50) {\n    place_info.description = r.snippet;\n  }\n}\n\n// Add commercial note if missing critical info\nif (!place_info.ticket_price) {\n  place_info.note_if_unknown = 'Hiện chưa có thông tin giá vé chính thức, bạn nên liên hệ địa phương để biết thêm chi tiết.';\n}\nif (!place_info.opening_hours) {\n  place_info.note_if_unknown = (place_info.note_if_unknown || '') + ' Thông tin giờ mở cửa chưa được cập nhật.';\n}\n\nreturn {\n  intent: 'GET_PLACE_INFO',\n  place_info,\n  location: placeData.placeName || placeData.locationDisplay,\n  has_results: !!(place_info.description || place_info.ticket_price || place_info.opening_hours)\n};"
+      },
+      "id": "fn-format-place-info",
+      "name": "Fn_FormatPlaceInfo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60160,
+        68480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== BUILD COMPLETE REQUEST BODY =====\n// Mission: Tạo TOÀN BỘ request body cho OpenRouter\n// ⚡ UPDATED: Hỗ trợ 6 intents\n\nconst data = $json;\n\nconst intent = data.intent || 'UNKNOWN';\nconst location = data.location || null;\nconst has_results = data.has_results !== false;\n\n// Chuẩn hóa data theo intent\nlet structured_data = null;\n\nif (intent === 'SEARCH_POI') {\n  structured_data = {\n    places: data.poi_raw || [],\n    count: (data.poi_raw || []).length\n  };\n} else if (intent === 'GET_WEATHER') {\n  structured_data = {\n    weather: data.weather_raw || null\n  };\n} else if (intent === 'SEARCH_HOTEL') {\n  structured_data = {\n    hotels: data.hotels_raw || [],\n    count: (data.hotels_raw || []).length\n  };\n} else if (intent === 'GET_PLACE_INFO') {\n  structured_data = {\n    place_info: data.place_info || null\n  };\n} else if (intent === 'SEARCH_NEARBY') {\n  structured_data = {\n    nearby_places: data.nearby_raw || [],\n    count: (data.nearby_raw || []).length,\n    poi_type: data.poiType || 'địa điểm'\n  };\n} else if (intent === 'SEARCH_TOUR') {\n  structured_data = {\n    tours: data.tours_raw || [],\n    count: (data.tours_raw || []).length,\n    duration: data.duration || null\n  };\n}\n\nconst ai_input = {\n  intent,\n  location,\n  has_results,\n  data: structured_data\n};\n\nconst systemPrompt = `VAI TRÒ\nBạn là module VIẾT LẠI KẾT QUẢ cho chatbot du lịch thương mại.\nBạn KHÔNG phải công cụ tìm kiếm, KHÔNG phải AI sáng tác.\n\nMỤC TIÊU\n- Đáng tin\n- Không nói sai\n- Không gây rối\n- Giống cách nhân viên tư vấn du lịch viết\n\nNGUYÊN TẮC BẮT BUỘC\n1. CHỈ sử dụng dữ liệu được cung cấp trong đầu vào.\n2. KHÔNG bịa thêm địa điểm, thông tin, hoặc chi tiết.\n3. KHÔNG suy diễn vượt quá dữ liệu.\n4. Nếu dữ liệu chỉ mang tính tổng quan → nói rõ là \"thông tin tổng quan\".\n5. Nếu địa danh trong input không rõ ràng → diễn đạt trung tính, không khẳng định sai.\n6. Nếu có note_if_unknown → BẮT BUỘC đưa vào response.\n\nQUY TẮC VIẾT NỘI DUNG\n- ĐƯỢC tóm tắt và diễn đạt lại từ nội dung nguồn.\n- KHÔNG sao chép nguyên văn tiêu đề, snippet, hoặc mô tả SEO.\n- Mỗi địa điểm: 2–3 câu ngắn, trung tính.\n- Tránh từ ngữ quảng cáo, tránh văn phong AI.\n- TUYỆT ĐỐI KHÔNG dùng dấu \"...\".\n\nĐẶC BIỆT CHO GET_PLACE_INFO\n- Nếu có giá vé: ghi rõ\n- Nếu có giờ mở cửa: ghi rõ\n- Nếu KHÔNG có: nói \"Hiện chưa có thông tin chính thức, vui lòng liên hệ địa phương\"\n\nĐẶC BIỆT CHO SEARCH_NEARBY\n- Liệt kê theo thứ tự gần nhất\n- Nếu có distance: ghi khoảng cách\n- Nếu có rating: ghi đánh giá\n\nĐẶC BIỆT CHO SEARCH_TOUR\n- Nêu tên tour và nguồn\n- KHÔNG tự lập lịch trình\n- Khuyến nghị: \"Bạn có thể liên hệ các đơn vị trên để biết thêm chi tiết\"\n\nTRÌNH BÀY\n- Danh sách rõ ràng\n- Tên địa điểm in đậm\n- Cuối câu trả lời: hỏi tiếp 1 câu định hướng nhẹ\n\nCHỈ TRẢ VỀ JSON HỢP LỆ. KHÔNG thêm chữ giải thích. KHÔNG markdown.\n{\n  \"response\": \"Nội dung phản hồi cho người dùng\",\n  \"type\": \"success\"\n}`;\n\nconst requestBody = {\n  model: 'openai/gpt-4o-mini',\n  temperature: 0.3,\n  max_tokens: 600,\n  messages: [\n    {\n      role: 'system',\n      content: systemPrompt\n    },\n    {\n      role: 'user',\n      content: 'Dữ liệu:\\n' + JSON.stringify(ai_input, null, 2)\n    }\n  ]\n};\n\nreturn { requestBody };"
+      },
+      "id": "81319b58-db1e-4c99-b48b-945095e276eb",
+      "name": "Fn_BuildAIInput",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60384,
+        68192
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.requestBody }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "f23f27eb-999a-4639-8f22-e314a3615a9e",
+      "name": "AI_Response_Guard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        60608,
+        68192
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "SVjS2GRy7ezqnu9w",
+          "name": "Bearer Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE AI GUARD RESPONSE =====\nconst content = ($json.choices?.[0]?.message?.content || '{}').trim();\nlet parsed = {};\ntry {\n  parsed = JSON.parse(content);\n} catch(e) {\n  parsed = {\n    response: 'Đã xảy ra lỗi khi xử lý kết quả. Vui lòng thử lại.',\n    type: 'error'\n  };\n}\n\nreturn parsed;"
+      },
+      "id": "c99dcf1d-9084-4f2a-af5a-d4888a6c4248",
+      "name": "Fn_ParseGuardResponse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60832,
+        68192
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "c2424688-fba9-492d-a100-f70a68c7a014",
+      "name": "Respond_Final",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        61856,
+        68432
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook_ReceiveMessage": {
+      "main": [
+        [
+          {
+            "node": "Fn_NormalizeInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NormalizeInput": {
+      "main": [
+        [
+          {
+            "node": "IF_IsTravelDomain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_IsTravelDomain": {
+      "main": [
+        [
+          {
+            "node": "Fn_DetectIntentRuleBased",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond_OutOfScope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_OutOfScope": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_DetectIntentRuleBased": {
+      "main": [
+        [
+          {
+            "node": "Fn_CheckRequiredSlots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_CheckRequiredSlots": {
+      "main": [
+        [
+          {
+            "node": "IF_NeedIntentClarification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NeedIntentClarification": {
+      "main": [
+        [
+          {
+            "node": "Respond_ClarifyIntent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Switch_SpecialIntent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_ClarifyIntent": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_SpecialIntent": {
+      "main": [
+        [
+          {
+            "node": "IF_Nearby_NoLocation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_ParseTourDuration",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF_PlaceInfo_NoPlaceName",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF_NeedLocationClarification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_Nearby_NoLocation": {
+      "main": [
+        [
+          {
+            "node": "Respond_RequestLocation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_BuildNearbySearch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_RequestLocation": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_BuildNearbySearch": {
+      "main": [
+        [
+          {
+            "node": "HTTP_SearchNearby",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchNearby": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatNearby",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatNearby": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildAIInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseTourDuration": {
+      "main": [
+        [
+          {
+            "node": "IF_Tour_NoLocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_Tour_NoLocation": {
+      "main": [
+        [
+          {
+            "node": "Respond_ClarifyTourLocation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_SearchTour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_ClarifyTourLocation": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchTour": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatTour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatTour": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildAIInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_PlaceInfo_NoPlaceName": {
+      "main": [
+        [
+          {
+            "node": "Respond_ClarifyPlaceName",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_ResolvePlaceName",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_ClarifyPlaceName": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ResolvePlaceName": {
+      "main": [
+        [
+          {
+            "node": "HTTP_SearchPlaceInfo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NeedLocationClarification": {
+      "main": [
+        [
+          {
+            "node": "Respond_ClarifyLocation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_ExtractLocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_ClarifyLocation": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ExtractLocation": {
+      "main": [
+        [
+          {
+            "node": "IF_LocationValid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_LocationValid": {
+      "main": [
+        [
+          {
+            "node": "HTTP_Geocode",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond_LocationInvalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_LocationInvalid": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_Geocode": {
+      "main": [
+        [
+          {
+            "node": "Fn_ParseGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseGeocode": {
+      "main": [
+        [
+          {
+            "node": "IF_GeocodeSuccess",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_GeocodeSuccess": {
+      "main": [
+        [
+          {
+            "node": "Switch_RouteToAPI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond_GeocodeFailed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond_GeocodeFailed": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_RouteToAPI": {
+      "main": [
+        [
+          {
+            "node": "HTTP_SearchPOI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_GetWeather",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_SearchHotel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_SearchPlaceInfo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchPOI": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatPOI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GetWeather": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatWeather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchHotel": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatHotel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchPlaceInfo": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatPlaceInfo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatPOI": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildAIInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatWeather": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildAIInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatHotel": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildAIInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatPlaceInfo": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildAIInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_BuildAIInput": {
+      "main": [
+        [
+          {
+            "node": "AI_Response_Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI_Response_Guard": {
+      "main": [
+        [
+          {
+            "node": "Fn_ParseGuardResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseGuardResponse": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "8298d6d82438e8d5ee28189bff4aaace26c9e5a75151cb6d6f4c18d7bb992ea7"
+  }
+}
+
+
+
+
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "disciplined-travel",
+        "responseMode": "lastNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "61bf2a25-6106-4059-9c7d-16c4fd853e25",
+      "name": "Webhook_ReceiveMessage",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        56800,
+        68400
+      ],
+      "webhookId": "disciplined-travel"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== NORMALIZE INPUT =====\n// Mission: Clean ONLY, không sửa nghĩa\n// ⚡ FIX: Xử lý mọi cách n8n trả data từ webhook\n\n// n8n webhook trả data trong $json.body\nconst body = $json.body || {};\nconst query = $json.query || {};\nconst headers = $json.headers || {};\n\n// Get or generate sessionId\nlet sessionId = body.sessionId || query.sessionId || headers['x-session-id'];\nif (!sessionId) {\n  const timestamp = Date.now();\n  const random = Math.random().toString(36).substring(2, 15);\n  sessionId = `sess_${timestamp}_${random}`;\n}\n\n// Extract message từ body\nconst message = String(body.message || '').trim();\nconst messageLower = message.toLowerCase();\n\n// Nhận user_location từ client (cho Nearby)\nconst userLocation = body.user_location || null;\n\nreturn {\n  sessionId,\n  message,\n  messageLower,\n  userLocation\n};"
+      },
+      "id": "d1dd8dc6-c5a1-4739-a831-e70ae7bfa4ae",
+      "name": "Fn_NormalizeInput",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        57024,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.messageLower }}",
+              "rightValue": "du lịch|địa điểm|tham quan|đi chơi|đi đâu|thời tiết|khách sạn|hotel|weather|attraction|tour|gần tôi|quanh tôi|giá vé|giờ mở cửa|thông tin|hành trình|ngày",
+              "operator": {
+                "type": "string",
+                "operation": "regex"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "6dd02752-a823-4850-b3b9-27d87d26a203",
+      "name": "IF_IsTravelDomain",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        57248,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  response: 'Hiện tại tôi hỗ trợ:\\n\\n📍 Thông tin địa điểm (giá vé, giờ mở cửa)\\n🏞️ Tìm địa điểm du lịch\\n🏚️ Tìm khách sạn\\n🧳 Tìm tour trọn gói\\n🌦️ Xem thời tiết\\n📍 Tìm gần tôi\\n\\nVí dụ: \"Thông tin đền Thái Vi\" hoặc \"3 điểm du lịch gần tôi\"',\n  type: 'out_of_scope'\n};"
+      },
+      "id": "dfaba99e-ddd3-40f9-80cd-2360487bdcc5",
+      "name": "Respond_OutOfScope",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61600,
+        69200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== RULE-BASED INTENT DETECTION =====\n// Mission: Phân loại intent bằng keyword, KHÔNG AI\n// ⚡ THÊM: GET_PLACE_INFO, SEARCH_NEARBY, SEARCH_TOUR\n\nconst msg = $json.messageLower;\nconst prevData = $json;\n\nlet intent = 'UNKNOWN';\nlet confidence = 'low';\n\n// ===== PRIORITY ORDER (quan trọng!) =====\n\n// 1️⃣ SEARCH_NEARBY - Ưu tiên cao nhất\nif (\n  msg.includes('gần tôi') ||\n  msg.includes('quanh tôi') ||\n  msg.includes('xung quanh tôi') ||\n  msg.includes('gần đây') ||\n  msg.includes('near me') ||\n  msg.includes('nearby')\n) {\n  intent = 'SEARCH_NEARBY';\n  confidence = 'high';\n}\n\n// 2️⃣ GET_PLACE_INFO - Thông tin chi tiết\nelse if (\n  msg.includes('giá vé') ||\n  msg.includes('giờ mở cửa') ||\n  msg.includes('thông tin') ||\n  msg.includes('mở cửa lúc') ||\n  msg.includes('vé vào') ||\n  msg.includes('phí tham quan') ||\n  msg.includes('miễn phí') ||\n  msg.includes('mất phí')\n) {\n  intent = 'GET_PLACE_INFO';\n  confidence = 'high';\n}\n\n// 3️⃣ SEARCH_TOUR - Tour du lịch\nelse if (\n  msg.includes('tour ') ||\n  msg.match(/\\d+\\s*ngày/) ||  // \"5 ngày\", \"3ngày\"\n  msg.includes('hành trình') ||\n  msg.includes('lịch trình') ||\n  msg.includes('chuyến đi')\n) {\n  intent = 'SEARCH_TOUR';\n  confidence = 'high';\n}\n\n// 4️⃣ GET_WEATHER - Thời tiết\nelse if (\n  msg.includes('thời tiết') ||\n  msg.includes('weather') ||\n  msg.includes('mưa') ||\n  msg.includes('nắng') ||\n  msg.includes('nhiệt độ') ||\n  msg.includes('độ c')\n) {\n  intent = 'GET_WEATHER';\n  confidence = 'high';\n}\n\n// 5️⃣ SEARCH_HOTEL - Khách sạn\nelse if (\n  msg.includes('khách sạn') ||\n  msg.includes('hotel') ||\n  msg.includes('phòng nghỉ') ||\n  msg.includes('homestay') ||\n  msg.includes('resort') ||\n  msg.includes('nhà nghỉ')\n) {\n  intent = 'SEARCH_HOTEL';\n  confidence = 'high';\n}\n\n// 6️⃣ SEARCH_POI - Địa điểm du lịch (default cho travel domain)\nelse if (\n  msg.includes('địa điểm') ||\n  msg.includes('tham quan') ||\n  msg.includes('du lịch') ||\n  msg.includes('đi chơi') ||\n  msg.includes('đi đâu') ||\n  msg.includes('attraction')\n) {\n  intent = 'SEARCH_POI';\n  confidence = 'high';\n}\n\nreturn {\n  sessionId: prevData.sessionId,\n  message: prevData.message,\n  messageLower: prevData.messageLower,\n  userLocation: prevData.userLocation,\n  intent,\n  confidence\n};"
+      },
+      "id": "af8b5ae1-rule-based-intent",
+      "name": "Fn_DetectIntentRuleBased",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        57472,
+        68304
+      ]
+    },
+    {
+      "parameters": {
         "jsCode": "// ===== CHECK REQUIRED SLOTS (STRICT, NO GUESS) =====\n// Mission: Check dữ liệu có sẵn - KHÔNG tạo default\n// ⚡ AGODA-STYLE: Location = placeName HOẶC userLocation (chưa cần lat/lng)\n\nconst data = $json;\nconst message = data.messageLower || '';\nconst intent = data.intent || 'UNKNOWN';\n\n// ✅ LUÔN ĐỌC TỪ $json\nconst userLocation = data.userLocation || null;\n\n// ---- CHECK PLACE NAME (explicit text) ----\nconst hasPlaceName =\n  message.includes('đền') ||\n  message.includes('chùa') ||\n  message.includes('nhà thờ') ||\n  message.includes('bảo tàng') ||\n  message.includes('lăng') ||\n  message.includes('hồ ') ||\n  message.includes('núi ') ||\n  message.includes('biển');\n\n// ---- CHECK LOCATION HINT (city/area names) ----\nconst hasLocationHint =\n  message.includes('ở ') ||\n  message.includes('tại ') ||\n  message.includes('gần ') ||\n  message.includes('quanh ') ||\n  message.includes('xung quanh ') ||\n  message.includes('khu vực ') ||\n  message.includes('hà nội') ||\n  message.includes('sài gòn') ||\n  message.includes('đà nẵng') ||\n  message.includes('ninh bình');\n\n// ---- CHECK \"GẦN TÔI\" ----\nconst isNearMe =\n  message.includes('gần tôi') ||\n  message.includes('quanh tôi') ||\n  message.includes('xung quanh tôi') ||\n  message.includes('gần đây');\n\n// ---- CHECK USER LOCATION AVAILABLE ----\nconst hasUserLocation = !!(userLocation && userLocation.lat && userLocation.lng);\n\n// ---- CHECK TIME ----\nconst hasTimeHint =\n  message.includes('hôm nay') ||\n  message.includes('cuối tuần') ||\n  message.includes('ngày mai') ||\n  message.includes('tuần này');\n\n// ---- CHECK TOUR DURATION ----\nconst durationMatch = message.match(/(\\d+)\\s*ngày/);\nconst tourDuration = durationMatch ? parseInt(durationMatch[1]) : null;\n\n// ---- SLOT VALIDATION - AGODA LOGIC ----\nlet missingSlots = [];\nlet needClarification = false;\n\n// 🔥 SEARCH_POI / SEARCH_NEARBY - Chấp nhận place name HOẶC userLocation\nif (intent === 'SEARCH_POI' || intent === 'SEARCH_NEARBY') {\n  // Có place name → OK (sẽ geocode sau)\n  // Có userLocation → OK (dùng device)\n  // \"gần tôi\" → OK (sẽ xin quyền sau)\n  const hasAnyLocationSource = hasPlaceName || hasLocationHint || hasUserLocation || isNearMe;\n  \n  if (!hasAnyLocationSource) {\n    missingSlots.push('location');\n    needClarification = true;\n  }\n}\n// GET_PLACE_INFO - Chỉ cần place name\nelse if (intent === 'GET_PLACE_INFO') {\n  if (!hasPlaceName) {\n    missingSlots.push('placeName');\n    needClarification = true;\n  }\n}\n// GET_WEATHER - Cần location hint\nelse if (intent === 'GET_WEATHER') {\n  if (!hasLocationHint && !hasPlaceName) {\n    missingSlots.push('location');\n    needClarification = true;\n  }\n}\n// SEARCH_HOTEL - Cần location hint\nelse if (intent === 'SEARCH_HOTEL') {\n  if (!hasLocationHint) {\n    missingSlots.push('location');\n    needClarification = true;\n  }\n}\n// SEARCH_TOUR - Cần duration\nelse if (intent === 'SEARCH_TOUR') {\n  if (!tourDuration) {\n    missingSlots.push('duration');\n    needClarification = true;\n  }\n}\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  messageLower: data.messageLower,\n  userLocation: data.userLocation,\n  intent: data.intent,\n  confidence: data.confidence,\n  hasLocationHint,\n  isNearMe,\n  hasUserLocation,\n  hasPlaceName,\n  hasTimeHint,\n  tourDuration,\n  missingSlots,\n  needClarification\n};"
       },
       "id": "6661cacf-8468-4fc4-a8c7-2194fee08157",
