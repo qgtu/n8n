@@ -5,16 +5,16 @@ import path from 'path';
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
 export const env = {
-  NODE_ENV: process.env.NODE_ENV || 'development',
-  PORT: parseInt(process.env.PORT || '3000', 10),
+  NODE_ENV: process.env.NODE_ENV || ,
+  PORT: parseInt(process.env.PORT ||  10),
   
   // Database (Postgres)
   DB: {
-    HOST: process.env.DB_POSTGRESDB_HOST || 'localhost',
-    PORT: parseInt(process.env.DB_POSTGRESDB_PORT || '5432', 10),
-    USER: process.env.DB_POSTGRESDB_USER || 'postgres',
-    PASSWORD: process.env.DB_POSTGRESDB_PASSWORD || '123456',
-    NAME: process.env.DB_POSTGRESDB_DATABASE || 'disciplined_travel',
+    HOST: process.env.DB_POSTGRESDB_HOST,
+    PORT: parseInt(process.env.DB_POSTGRESDB_PORT || 10),
+    USER: process.env.DB_POSTGRESDB_USER ,
+    PASSWORD: process.env.DB_POSTGRESDB_PASSWORD ,
+    NAME: process.env.DB_POSTGRESDB_DATABASE ,
   },
   
   // Telegram
