@@ -13,8 +13,8 @@ export const env = {
     HOST: process.env.DB_POSTGRESDB_HOST || 'localhost',
     PORT: parseInt(process.env.DB_POSTGRESDB_PORT || '5432', 10),
     USER: process.env.DB_POSTGRESDB_USER || 'postgres',
-    PASSWORD: process.env.DB_POSTGRESDB_PASSWORD || 'postgres',
-    NAME: process.env.DB_POSTGRESDB_DATABASE || 'n8n',
+    PASSWORD: process.env.DB_POSTGRESDB_PASSWORD || '123456',
+    NAME: process.env.DB_POSTGRESDB_DATABASE || 'disciplined_travel',
   },
   
   // Telegram

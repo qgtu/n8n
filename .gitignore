@@ -25,3 +25,8 @@ Thumbs.db
 !.vscode/launch.json
 !.vscode/extensions.json
 .idea/
+
+# Environment files
+.env
+.env.*
+!.env.example
