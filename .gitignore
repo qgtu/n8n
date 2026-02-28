@@ -8,6 +8,7 @@ yarn.lock
 database.sqlite
 
 # Environment variables
+.env
 .env.local
 
 # Logs

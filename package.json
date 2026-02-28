@@ -7,6 +7,7 @@
   "scripts": {
     "start": "n8n start",
     "dev": "n8n start",
+    "start:log": "n8n start > logs/n8n-stdout.log 2>&1",
     "tunnel": "n8n start --tunnel",
     "memory": "node ./main_travel_assistant/memory-server.js",
     "update": "npm install -g n8n@2.0.0"

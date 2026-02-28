@@ -1,0 +1,2289 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "travel-bot",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "0a318f16-a4f0-4fe9-874a-0699742050c8",
+      "name": "Webhook_Receive",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        124128,
+        102528
+      ],
+      "webhookId": "travel-bot-webhook-001"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 2: Fn_ValidateInput\n// Normalize webhook data to root level. Extract sessionId, message, userLocation.\n// Output: {_valid, sessionId, message, messageLower, userLocation, _webhookTime}\n\nconst body = $json.body || $json;\nconst rawMessage = body.message || body.msg || '';\nconst sessionId = body.session_id || body.sessionId || 'anon_' + Date.now();\n\nif (!rawMessage || typeof rawMessage !== 'string' || !rawMessage.trim()) {\n  return {\n    _valid: false,\n    error: 'Tin nhắn không hợp lệ hoặc trống.'\n  };\n}\n\nconst message = rawMessage.trim();\nconst messageLower = message.toLowerCase();\n\n// Parse userLocation\nlet userLocation = null;\nconst rawLoc = body.user_location || body.userLocation || null;\nif (rawLoc && typeof rawLoc === 'object' &&\n    typeof rawLoc.lat === 'number' && typeof rawLoc.lng === 'number') {\n  userLocation = { lat: rawLoc.lat, lng: rawLoc.lng };\n}\n\nreturn {\n  _valid: true,\n  sessionId,\n  message,\n  messageLower,\n  userLocation,\n  _webhookTime: Date.now()\n};"
+      },
+      "id": "ae0b84b8-c47a-4f3e-be14-fcb3d3d58f24",
+      "name": "Fn_ValidateInput",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        124352,
+        102528
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-valid",
+              "leftValue": "={{ $json._valid === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c8df419a-94d4-4c9a-93f7-c171566f2f55",
+      "name": "IF_InputValid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        124576,
+        102528
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, type: 'validation_error', data: null, message: $json.error || 'Tin nhắn không hợp lệ.' }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "82e2e65a-eb5f-4c4b-afcc-6e4dbcdf60db",
+      "name": "Respond_InvalidInput",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        124800,
+        102624
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 5: Fn_DetectIntentRule\n// Rule-first regex intent detection\n// V3: distance mode merged into GET_DIRECTIONS + cleanPlace entity sanitize\n// Priority: weather → ticket → hours → DISTANCE → directions → nearby → tour\n\nfunction cleanPlace(str) {\n  if (!str) return '';\n  return str\n    .normalize('NFC')\n    .replace(/\\s*(?:là\\s+)?(?:bao\\s+(?:xa|nhiêu|nhieu|lâu|lau)|khoảng\\s+cách|khoang\\s+cach|mấy\\s+(?:km|giờ|gio)|may\\s+(?:km|gio)|cách\\s+bao\\s+xa|cach\\s+bao\\s+xa|chỉ\\s+đường|chi\\s+duong|đường\\s+đi|duong\\s+di)(?:\\s+km)?.*$/gi, '')\n    .replace(/\\s*\\?\\s*$/g, '')\n    .trim();\n}\n\nconst msg = ($json.messageLower || '').normalize('NFC');\nconst msgOrig = $json.message || '';\n\n// 1. GET_WEATHER\nif (/thời tiết|thoi tiet|nhiệt độ|nhiet do|weather/.test(msg)) {\n  const entity = msg.replace(/thời tiết|thoi tiet|nhiệt độ|nhiet do|weather|hôm nay|ngày mai|bây giờ/gi, '').trim() || null;\n  return { ...$json, intent: 'GET_WEATHER', _ruleMatched: true, entity };\n}\n\n// 2. GET_TICKET_PRICE\nif (/giá vé|gia ve|bao nhiêu tiền|bao nhieu tien|ticket price/.test(msg)) {\n  const entity = msg.replace(/giá vé|gia ve|bao nhiêu tiền|bao nhieu tien|ticket price|là|của|ở/gi, '').trim() || null;\n  return { ...$json, intent: 'GET_TICKET_PRICE', _ruleMatched: true, entity };\n}\n\n// 3. GET_OPENING_HOURS\nif (/giờ mở cửa|gio mo cua|mấy giờ mở|may gio mo|opening hour/.test(msg)) {\n  const entity = msg.replace(/giờ mở cửa|gio mo cua|mấy giờ mở|may gio mo|opening hour|lúc|của|ở/gi, '').trim() || null;\n  return { ...$json, intent: 'GET_OPENING_HOURS', _ruleMatched: true, entity };\n}\n\n// 4. GET_DIRECTIONS — distance mode (NEW V2)\nconst distanceKeywords = /bao xa|khoảng cách|khoang cach|bao nhiêu km|mấy km|may km|cách bao xa|cach bao xa/;\nif (distanceKeywords.test(msg)) {\n  if (/chỉ đường|chi duong|đường đi|duong di|chỉ.*đường/i.test(msg)) {\n    // Fall through — directions regex (#5) catches with _routeMode: 'full'\n  } else {\n    const distDirMatch = msg.match(/từ\\s+(.+?)\\s+đến\\s+(.+)/);\n    if (distDirMatch) {\n      if (distDirMatch[2].includes(' và ') || distDirMatch[2].includes(' va ')) {\n        return { ...$json, _ruleMatched: false };\n      }\n      return {\n        ...$json,\n        intent: 'GET_DIRECTIONS',\n        _ruleMatched: true,\n        _routeMode: 'distance_only',\n        entity_origin: cleanPlace(distDirMatch[1]),\n        entity_destination: cleanPlace(distDirMatch[2]),\n        entity: null\n      };\n    }\n  }\n}\n\n// 5. GET_DIRECTIONS — full mode\nconst dirMatch = msg.match(/từ\\s+(.+?)\\s+đến\\s+(.+)/);\nif (dirMatch) {\n  return {\n    ...$json,\n    intent: 'GET_DIRECTIONS',\n    _ruleMatched: true,\n    _routeMode: 'full',\n    entity_origin: cleanPlace(dirMatch[1]),\n    entity_destination: cleanPlace(dirMatch[2]),\n    entity: null\n  };\n}\nif (/chỉ đường|chi duong|đường đi|duong di|directions/.test(msg)) {\n  return { ...$json, intent: 'GET_DIRECTIONS', _ruleMatched: true, _routeMode: 'full', entity: null, entity_origin: null, entity_destination: null };\n}\n\n// 6. SEARCH_NEARBY\nif (/gần đây|gan day|xung quanh|địa điểm gần|dia diem gan|nearby/.test(msg)) {\n  const entity = msg.replace(/gần đây|gan day|xung quanh|địa điểm gần|dia diem gan|nearby|gần|ở/gi, '').trim() || null;\n  return { ...$json, intent: 'SEARCH_NEARBY', _ruleMatched: true, entity };\n}\n\n// 7. SEARCH_TOUR — broader match + entity extraction\nconst tourDurationMatch = msg.match(/(\\d+)\\s*ngày/);\nif (/\\btour\\b|du lịch|lịch trình/.test(msg)) {\n  const tourEntity = msg.replace(/\\btour\\b|du lịch|lịch trình|tìm|thông tin|có gì|cuối tuần|cuoi tuan|này|nay|\\d+\\s*ngày|\\?/gi, '').trim() || null;\n  return {\n    ...$json,\n    intent: 'SEARCH_TOUR',\n    _ruleMatched: true,\n    entity: tourEntity,\n    duration_days: tourDurationMatch ? parseInt(tourDurationMatch[1], 10) : null\n  };\n}\n\n// No match → LLM fallback\nreturn { ...$json, intent: null, _ruleMatched: false };"
+      },
+      "id": "8fc3b246-2a96-4ba4-95d2-cd68e9ad25e4",
+      "name": "Fn_DetectIntentRule",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        124800,
+        102432
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-rule-matched",
+              "leftValue": "={{ $json._ruleMatched === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a02abf64-f77b-41dc-9932-e1d09dcfad49",
+      "name": "IF_RuleMatched",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        125024,
+        102432
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'google/gemini-2.0-flash-001', temperature: 0, max_tokens: 300, messages: [{ role: 'system', content: 'Bạn là bộ phân loại intent cho travel bot Ninh Bình. Phân tích câu hỏi và trả về JSON.\\nCác intent hợp lệ: GET_PLACE_INFO, GET_OPENING_HOURS, GET_TICKET_PRICE, GET_WEATHER, SEARCH_NEARBY, GET_DIRECTIONS, SEARCH_TOUR, FALLBACK.\\nOutput JSON: {\"intent\": \"...\", \"entity\": \"...\", \"entity_origin\": null, \"entity_destination\": null, \"duration_days\": null}\\nChỉ trả JSON, không giải thích.' }, { role: 'user', content: $json.message }] }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "2296a1da-eb3b-42fe-b46a-1e6ea09723eb",
+      "name": "HTTP_LLMClassify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        125248,
+        102512
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 8: Fn_NormalizeLLM\n// Parse LLM JSON, validate intent, extract entities\n// Audit fix A13: null entity for entity-required intents → FALLBACK\n\nconst VALID_INTENTS = ['GET_PLACE_INFO','GET_OPENING_HOURS','GET_TICKET_PRICE','GET_WEATHER','SEARCH_NEARBY','GET_DIRECTIONS','SEARCH_TOUR','FALLBACK'];\nconst ENTITY_REQUIRED = ['GET_PLACE_INFO','GET_OPENING_HOURS','GET_TICKET_PRICE','GET_WEATHER','SEARCH_NEARBY','GET_DIRECTIONS'];\n\nconst prev = $('Fn_DetectIntentRule').item.json;\nlet parsed = null;\n\ntry {\n  const raw = $json?.choices?.[0]?.message?.content || '';\n  // Strip markdown code fences if present\n  const cleaned = raw.replace(/```json\\s*/g, '').replace(/```/g, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  return {\n    ...prev,\n    intent: 'FALLBACK',\n    _ruleMatched: false,\n    _llmParseFailed: true\n  };\n}\n\nlet intent = (parsed.intent || '').toUpperCase().trim();\nif (!VALID_INTENTS.includes(intent)) intent = 'FALLBACK';\n\nconst entity = parsed.entity || null;\nconst entity_origin = parsed.entity_origin || null;\nconst entity_destination = parsed.entity_destination || null;\nconst duration_days = parsed.duration_days || null;\n\n// A13: entity-required intents with null entity → FALLBACK\nif (ENTITY_REQUIRED.includes(intent)) {\n  if (intent === 'GET_DIRECTIONS') {\n    if (!entity_origin || !entity_destination) intent = 'FALLBACK';\n  } else {\n    if (!entity) intent = 'FALLBACK';\n  }\n}\n\nreturn {\n  ...prev,\n  intent,\n  entity,\n  entity_origin,\n  entity_destination,\n  duration_days,\n  _ruleMatched: false,\n  _llmClassified: true\n};"
+      },
+      "id": "5851fbc8-e1a5-4fa8-9c9e-70b00de67e36",
+      "name": "Fn_NormalizeLLM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        125472,
+        102512
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 9: Fn_ValidateContext\n// Entity guard gate — blocks null entity for intents that require it\n// B2: per-intent Vietnamese clarification messages\n// C3: SEARCH_NEARBY GPS bypass\n\nconst REQUIRED = {\n  GET_PLACE_INFO: ['entity'],\n  GET_OPENING_HOURS: ['entity'],\n  GET_TICKET_PRICE: ['entity'],\n  GET_WEATHER: ['entity'],\n  SEARCH_NEARBY: ['entity'],\n  GET_DIRECTIONS: ['entity_origin', 'entity_destination'],\n};\n\nconst CLARIFY_MSG = {\n  GET_PLACE_INFO:    'Bạn muốn biết thông tin về địa điểm nào? Ví dụ: \"Tràng An có gì hay?\"',\n  GET_OPENING_HOURS: 'Bạn muốn xem giờ mở cửa của đâu? Ví dụ: \"Chùa Bái Đính mở cửa lúc mấy giờ?\"',\n  GET_TICKET_PRICE:  'Bạn muốn xem giá vé địa điểm nào? Ví dụ: \"Giá vé Tràng An bao nhiêu?\"',\n  GET_WEATHER:       'Địa điểm nào bạn muốn xem thời tiết? Ví dụ: \"Thời tiết Ninh Bình hôm nay\"',\n  SEARCH_NEARBY:     'Gần địa điểm nào? Ví dụ: \"Địa điểm gần Tràng An\" hoặc gửi vị trí GPS.',\n  GET_DIRECTIONS:    'Bạn muốn đi từ đâu đến đâu? Ví dụ: \"Chỉ đường từ Tràng An đến Bái Đính\"',\n};\n\nconst required = REQUIRED[$json.intent] || [];\nconst missing = required.filter(f => !$json[f] || !String($json[f]).trim());\n\n// C3: SEARCH_NEARBY special — GPS bypass\nif ($json.intent === 'SEARCH_NEARBY' && missing.includes('entity')) {\n  const gps = $json.userLocation;\n  const hasGPS = gps && typeof gps.lat === 'number' && typeof gps.lng === 'number'\n    && Math.abs(gps.lat) > 0.0001 && Math.abs(gps.lng) > 0.0001;\n  if (hasGPS) {\n    return $json; // GPS present — bypass entity requirement\n  }\n}\n\nif (missing.length > 0) {\n  return {\n    ...$json,\n    intent: 'FALLBACK',\n    _originalIntent: $json.intent,\n    _missingFields: missing,\n    _clarifyMessage: CLARIFY_MSG[$json.intent] || 'Xin lỗi, bạn có thể nói rõ hơn được không?'\n  };\n}\n\nreturn $json;"
+      },
+      "id": "2c820e29-5431-43f3-bb3f-6549fc2cbabd",
+      "name": "Fn_ValidateContext",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        125696,
+        102416
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_PLACE_INFO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_OPENING_HOURS",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_TICKET_PRICE",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_WEATHER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_NEARBY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_DIRECTIONS",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_TOUR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a0bb900b-66ea-44d1-a578-cd92facc6c88",
+      "name": "Switch_Intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        126368,
+        102352
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 11: Fn_PrepPlaceInfo\n// Normalize slug from entity using canonical slugify()\n\nfunction slugify(text) {\n  if (!text) return '';\n  return text\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd')\n    .replace(/Đ/g, 'd')\n    .toLowerCase()\n    .trim()\n    .replace(/[^a-z0-9\\s-]/g, '')\n    .replace(/\\s+/g, '-')\n    .replace(/-+/g, '-')\n    .replace(/^-|-$/g, '');\n}\n\nconst slug = slugify($json.entity || '');\nif (!slug) {\n  return { ...$json, success: false, type: 'error', data: null, message: 'Không xác định được địa điểm.', slug: '' };\n}\n\nreturn { ...$json, slug, entityDisplay: $json.entity };"
+      },
+      "id": "06986528-582f-474e-8320-9fe415ce8add",
+      "name": "Fn_PrepPlaceInfo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127264,
+        101472
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.name, p.slug, p.description, p.latitude, p.longitude, p.place_type,\n  t.ticket_type, t.adult_price, t.child_price, t.notes AS ticket_notes,\n  oh.hours\nFROM places p\nLEFT JOIN tickets t ON t.place_id = p.id\nLEFT JOIN (\n  SELECT place_id,\n    json_agg(json_build_object(\n      'day', day_of_week, 'open', open_time,\n      'close', close_time, 'closed', is_closed\n    ) ORDER BY day_of_week) AS hours\n  FROM opening_hours\n  GROUP BY place_id\n) oh ON oh.place_id = p.id\nWHERE p.slug = '{{ $json.slug }}' AND p.is_active = true\nLIMIT 1",
+        "options": {}
+      },
+      "id": "f01f5643-ca5b-4e87-8319-58741d00296c",
+      "name": "DB_LookupPlace",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        127488,
+        101472
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 13: Fn_FormatPlaceInfo\n// Build {success, type, data, message} from DB result\n// D5: try/catch with graceful error\n\ntry {\n  const db = $json;\n  const prep = $('Fn_PrepPlaceInfo').item.json;\n  \n  if (!db || !db.name) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy thông tin về ' + (prep.entityDisplay || 'địa điểm này') + '.'\n    };\n  }\n  \n  const data = {\n    name: db.name,\n    slug: db.slug,\n    description: db.description || '',\n    place_type: db.place_type || 'landmark',\n    coordinates: { lat: db.latitude, lng: db.longitude },\n    ticket: db.ticket_type ? {\n      type: db.ticket_type,\n      adult_price: db.adult_price,\n      child_price: db.child_price,\n      notes: db.ticket_notes\n    } : null,\n    opening_hours: db.hours || []\n  };\n  \n  let msg = `${db.name}: ${db.description || 'Một địa điểm du lịch tại Ninh Bình.'}`;\n  if (db.ticket_type) {\n    msg += ` Giá vé: ${db.adult_price?.toLocaleString('vi-VN') || 0}đ (người lớn), ${db.child_price?.toLocaleString('vi-VN') || 0}đ (trẻ em).`;\n  }\n  \n  return { success: true, type: 'place_info', data, message: msg };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi xử lý thông tin địa điểm.' };\n}"
+      },
+      "id": "7d910cf9-186d-436e-bef8-613dccfdbe05",
+      "name": "Fn_FormatPlaceInfo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        101408
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 14: Fn_PrepOpenHours\n// Normalize slug from entity\n\nfunction slugify(text) {\n  if (!text) return '';\n  return text\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'd')\n    .toLowerCase().trim()\n    .replace(/[^a-z0-9\\s-]/g, '')\n    .replace(/\\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');\n}\n\nconst slug = slugify($json.entity || '');\nif (!slug) {\n  return { ...$json, success: false, type: 'error', data: null, message: 'Không xác định được địa điểm.', slug: '' };\n}\nreturn { ...$json, slug, entityDisplay: $json.entity };"
+      },
+      "id": "f40d187f-397b-41bb-bea8-ad2f8502dfdc",
+      "name": "Fn_PrepOpenHours",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127264,
+        101888
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.name, oh.day_of_week, oh.open_time, oh.close_time, oh.is_closed\nFROM opening_hours oh JOIN places p ON p.id = oh.place_id\nWHERE p.slug = '{{ $json.slug }}' AND p.is_active = true\nORDER BY oh.day_of_week",
+        "options": {}
+      },
+      "id": "3067e6e6-f52b-47b5-be36-0ed06894211f",
+      "name": "DB_LookupOpenHours",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        127488,
+        101888
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 16: Fn_FormatOpenHours\n// Multi-row (7 days). Build today's status.\n\nconst DAY_NAMES = ['Chủ nhật','Thứ hai','Thứ ba','Thứ tư','Thứ năm','Thứ sáu','Thứ bảy'];\n\ntry {\n  const items = $input.all();\n  const rows = items.map(i => i.json).filter(r => r && r.day_of_week !== undefined && r.day_of_week !== null);\n  const prep = $('Fn_PrepOpenHours').first()?.json ?? {};\n  \n  if (rows.length === 0) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy giờ mở cửa của ' + (prep.entityDisplay || 'địa điểm này') + '.'\n    };\n  }\n  \n  const placeName = rows[0].name || prep.entityDisplay;\n  const today = new Date().getDay(); // 0=Sunday\n  \n  const schedule = rows.map(r => ({\n    day: DAY_NAMES[r.day_of_week] || `Ngày ${r.day_of_week}`,\n    day_of_week: r.day_of_week,\n    open: r.is_closed ? null : r.open_time,\n    close: r.is_closed ? null : r.close_time,\n    is_closed: r.is_closed || false\n  }));\n  \n  const todayInfo = schedule.find(s => s.day_of_week === today);\n  let todayStatus = 'Không rõ';\n  if (todayInfo) {\n    todayStatus = todayInfo.is_closed ? 'Đóng cửa' : `Mở cửa ${todayInfo.open} - ${todayInfo.close}`;\n  }\n  \n  const msg = `${placeName} — Hôm nay (${DAY_NAMES[today]}): ${todayStatus}.`;\n  \n  return {\n    success: true, type: 'opening_hours',\n    data: { name: placeName, today: todayStatus, schedule },\n    message: msg\n  };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi xử lý giờ mở cửa.' };\n}"
+      },
+      "id": "d9f41804-e7b0-416a-a3c4-9840e68cc185",
+      "name": "Fn_FormatOpenHours",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        101808
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 17: Fn_PrepTicketPrice\n\nfunction slugify(text) {\n  if (!text) return '';\n  return text\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'd')\n    .toLowerCase().trim()\n    .replace(/[^a-z0-9\\s-]/g, '')\n    .replace(/\\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');\n}\n\nconst slug = slugify($json.entity || '');\nif (!slug) {\n  return { ...$json, success: false, type: 'error', data: null, message: 'Không xác định được địa điểm.', slug: '' };\n}\nreturn { ...$json, slug, entityDisplay: $json.entity };"
+      },
+      "id": "90250240-5de0-4cbf-9cf5-c4139e071dd7",
+      "name": "Fn_PrepTicketPrice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127712,
+        102192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.name, t.ticket_type, t.adult_price, t.child_price, t.notes\nFROM tickets t JOIN places p ON p.id = t.place_id\nWHERE p.slug = '{{ $json.slug }}' AND p.is_active = true",
+        "options": {}
+      },
+      "id": "23d31f94-dce7-4602-9558-448ef8be7987",
+      "name": "DB_LookupTicket",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        127936,
+        102192
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 19: Fn_FormatTicketPrice — V2\n// Multi-row (may have multiple ticket types)\n// Only handles found rows — IF_TicketFound gates 0-row case\n\ntry {\n  const items = $input.all();\n  const rows = items.map(i => i.json).filter(r => r && r.ticket_type);\n  const prep = $('Fn_PrepTicketPrice').first()?.json ?? {};\n  \n  if (rows.length === 0) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy thông tin giá vé của ' + (prep.entityDisplay || 'địa điểm này') + '.'\n    };\n  }\n  \n  const placeName = rows[0].name || prep.entityDisplay;\n  const tickets = rows.map(r => ({\n    type: r.ticket_type,\n    adult_price: r.adult_price || 0,\n    child_price: r.child_price || 0,\n    notes: r.notes || ''\n  }));\n  \n  let msg = 'Giá vé ' + placeName + ':\\n';\n  tickets.forEach(t => {\n    msg += '• ' + t.type + ': ' + (t.adult_price ? t.adult_price.toLocaleString('vi-VN') + 'đ (người lớn)' : 'Miễn phí') + ', ' + (t.child_price ? t.child_price.toLocaleString('vi-VN') + 'đ (trẻ em)' : 'Miễn phí');\n    if (t.notes) msg += ' — ' + t.notes;\n    msg += '\\n';\n  });\n  \n  return {\n    success: true, type: 'ticket_price',\n    data: { name: placeName, tickets, source: 'db' },\n    message: msg.trim()\n  };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi xử lý thông tin giá vé.' };\n}"
+      },
+      "id": "fb983e86-ca4a-4d61-84a1-ffe7ec56addb",
+      "name": "Fn_FormatTicketPrice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128384,
+        102096
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 20: Fn_PrepWeather\n\nfunction slugify(text) {\n  if (!text) return '';\n  return text\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'd')\n    .toLowerCase().trim()\n    .replace(/[^a-z0-9\\s-]/g, '')\n    .replace(/\\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');\n}\n\nconst slug = slugify($json.entity || '');\nif (!slug) {\n  return { ...$json, success: false, type: 'error', data: null, message: 'Không xác định được địa điểm.', slug: '' };\n}\nreturn { ...$json, slug, entityDisplay: $json.entity };"
+      },
+      "id": "d78a50fa-34a0-4cf0-bea5-058bd4ace928",
+      "name": "Fn_PrepWeather",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        126592,
+        102464
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT name, latitude, longitude FROM places WHERE slug = '{{ $json.slug }}' AND is_active = true LIMIT 1",
+        "options": {}
+      },
+      "id": "7e3569bd-cebb-4307-a9c1-acfb200e3676",
+      "name": "DB_WeatherCoords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        126816,
+        102464
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 22: Fn_ResolveWeatherCoords\n// C2: 0,0 coord guard — abs(lat) < 0.0001 treated as invalid\n// B3: _entityLevel for POI vs city\n\nconst db = $json;\nconst prep = $('Fn_PrepWeather').item.json;\n\nconst hasValidCoords = (\n  typeof db.latitude === 'number' &&\n  typeof db.longitude === 'number' &&\n  Math.abs(db.latitude) > 0.0001 &&\n  Math.abs(db.longitude) > 0.0001\n);\n\nconst dbFound = !!db.name;\n\nreturn {\n  ...prep,\n  weatherLocation: db.name || prep.entity,\n  lat: hasValidCoords ? db.latitude : null,\n  lng: hasValidCoords ? db.longitude : null,\n  _needGeocode: !hasValidCoords,\n  _entityLevel: dbFound ? 'poi' : 'city'\n};"
+      },
+      "id": "d7978c3a-0226-4148-a950-edcd303295c0",
+      "name": "Fn_ResolveWeatherCoords",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127040,
+        102464
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-need-geocode",
+              "leftValue": "={{ $json._needGeocode === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0afeb425-bacf-4eba-b210-24dc99dbda54",
+      "name": "IF_NeedGeocode",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        127264,
+        102464
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://geocode.search.hereapi.com/v1/geocode?q={{ encodeURIComponent($json.weatherLocation || $json.entity || '') }}&limit=1&in=countryCode:VNM&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "4e81c648-1d51-4dc5-a521-d2f0d6951941",
+      "name": "HTTP_HEREGeocode",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        127488,
+        102384
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 25: Fn_ParseGeocode\n// A7: defensive items check\n// B3: POI-level name fallback guard\n\nconst intentData = $('Fn_ResolveWeatherCoords').item.json;\nconst items = $json?.items;\n\nif (!items || !Array.isArray(items) || items.length === 0) {\n  const entityLevel = intentData._entityLevel || 'poi';\n  \n  if (entityLevel === 'city') {\n    return {\n      ...intentData,\n      lat: null, lng: null,\n      coordSource: 'name_fallback',\n      _needGeocode: false,\n      _geocodeFailed: true\n    };\n  } else {\n    return {\n      ...intentData,\n      lat: null, lng: null,\n      coordSource: 'none',\n      _needGeocode: false,\n      _geocodeFailed: true,\n      _poiLevelNoCoords: true\n    };\n  }\n}\n\nconst pos = items[0]?.position;\nif (!pos || typeof pos.lat !== 'number' || typeof pos.lng !== 'number') {\n  return { ...intentData, lat: null, lng: null,\n    coordSource: 'name_fallback', _needGeocode: false, _geocodeFailed: true };\n}\n\nreturn {\n  ...intentData,\n  lat: pos.lat, lng: pos.lng,\n  resolvedName: items[0].title || intentData.weatherLocation,\n  coordSource: 'geocode', _needGeocode: false\n};"
+      },
+      "id": "5e1b13b6-0c71-4d0c-83c7-a00ea4e285df",
+      "name": "Fn_ParseGeocode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127712,
+        102384
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json._poiLevelNoCoords ? '' : ('https://api.weatherapi.com/v1/current.json?q=' + ($json.lat && $json.lng ? $json.lat + ',' + $json.lng : encodeURIComponent($json.weatherLocation || $json.entity || '')) + '&aqi=yes&lang=vi&key=52c2f536877444ec8a0165526260501') }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "531f5f69-e240-47ff-b5bc-61f1beca1ec5",
+      "name": "HTTP_WeatherAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        127936,
+        102464
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 27: Fn_FormatWeather\n// B3: POI-level error handling\n// D3: defensive mapping\n\ntry {\n  const w = $json;\n  const prep = $('Fn_PrepWeather').item.json;\n  const coords = $('Fn_ResolveWeatherCoords').item.json;\n  \n  // B3: POI-level no coords\n  if (w?._poiLevelNoCoords || coords?._poiLevelNoCoords) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy tọa độ của ' + (prep.entityDisplay || 'địa điểm này') +\n        '. Hãy thử hỏi thời tiết theo tên tỉnh/thành phố, ví dụ: \"Thời tiết Ninh Bình\".'\n    };\n  }\n  \n  if (!w?.current) {\n    return { success: false, type: 'error', data: null, message: 'Không lấy được dữ liệu thời tiết.' };\n  }\n  \n  const c = w.current;\n  const data = {\n    name: coords?.weatherLocation || prep?.entityDisplay || 'Không rõ',\n    temp_c: c.temp_c,\n    condition: c.condition?.text || '',\n    humidity: c.humidity,\n    wind_kph: c.wind_kph,\n    feelslike_c: c.feelslike_c,\n    aqi: c.air_quality?.['us-epa-index'] || null\n  };\n  \n  const msg = `Thời tiết ${data.name}: ${data.temp_c}°C, ${data.condition}. Độ ẩm: ${data.humidity}%. Gió: ${data.wind_kph} km/h.`;\n  \n  return { success: true, type: 'weather', data, message: msg };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi xử lý dữ liệu thời tiết.' };\n}"
+      },
+      "id": "dd83dea0-2ca5-48a1-b3f9-fd9dd9f25441",
+      "name": "Fn_FormatWeather",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        102464
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 28: Fn_PrepNearby\n// A3: ref place existence check\n// C3: GPS bypass\n\nfunction slugify(text) {\n  if (!text) return '';\n  return text\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'd')\n    .toLowerCase().trim()\n    .replace(/[^a-z0-9\\s-]/g, '')\n    .replace(/\\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');\n}\n\nconst slug = slugify($json.entity || '');\nconst gps = $json.userLocation;\n\nconst hasGPS = (\n  gps && typeof gps.lat === 'number' && typeof gps.lng === 'number' &&\n  Math.abs(gps.lat) > 0.0001 && Math.abs(gps.lng) > 0.0001\n);\n\nreturn {\n  ...$json,\n  slug,\n  entityDisplay: $json.entity || 'vị trí của bạn',\n  _useGPS: hasGPS && !slug,\n  _gpsLat: hasGPS ? gps.lat : null,\n  _gpsLng: hasGPS ? gps.lng : null\n};"
+      },
+      "id": "ce3b5cae-6a69-4d21-bf22-974132bc89f5",
+      "name": "Fn_PrepNearby",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        126592,
+        102800
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-use-gps",
+              "leftValue": "={{ $json._useGPS === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "43d8eb9e-b868-4256-930a-86a516a7f853",
+      "name": "IF_NearbyGPS",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        126816,
+        102800
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.name, p.slug, p.description, p.place_type,\n  ROUND(CAST(\n    111.045 * SQRT(POWER(p.latitude - {{ $json._gpsLat }}, 2) +\n    POWER((p.longitude - {{ $json._gpsLng }}) * COS(RADIANS({{ $json._gpsLat }})), 2))\n  AS numeric), 2) AS distance_km,\n  'GPS' AS ref_name\nFROM places p\nWHERE p.is_active = true\nORDER BY distance_km ASC LIMIT 5",
+        "options": {}
+      },
+      "id": "1aca6378-a4ed-4af0-a2e9-02b673c12cd6",
+      "name": "DB_NearbyByGPS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        127040,
+        102704
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ref AS (\n  SELECT latitude, longitude, name FROM places\n  WHERE slug = '{{ $json.slug }}' AND is_active = true LIMIT 1\n)\nSELECT p.name, p.slug, p.description, p.place_type,\n  ROUND(CAST(\n    111.045 * SQRT(POWER(p.latitude - ref.latitude, 2) +\n    POWER((p.longitude - ref.longitude) * COS(RADIANS(ref.latitude)), 2))\n  AS numeric), 2) AS distance_km,\n  ref.name AS ref_name\nFROM places p, ref\nWHERE p.is_active = true AND p.slug != '{{ $json.slug }}'\nORDER BY distance_km ASC LIMIT 5",
+        "options": {}
+      },
+      "id": "13b52f3c-4b55-4c41-808e-8fab8a923978",
+      "name": "DB_NearbyPlaces",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        127040,
+        102944
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 30: Fn_FormatNearby\n// Multi-row. 0-row handling including ref place not found.\n\ntry {\n  const prep = $('Fn_PrepNearby').first()?.json ?? {};\n  const items = $input.all();\n  const rows = items.map(i => i.json).filter(r => r && r.name);\n  \n  if (rows.length === 0) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy địa điểm gần ' + (prep.entityDisplay || 'đây') + '. Kiểm tra lại tên địa điểm.'\n    };\n  }\n  \n  const refName = rows[0].ref_name || prep.entityDisplay || 'đây';\n  const places = rows.map(r => ({\n    name: r.name,\n    slug: r.slug,\n    description: r.description || '',\n    place_type: r.place_type || 'landmark',\n    distance_km: r.distance_km\n  }));\n  \n  let msg = `Các địa điểm gần ${refName}:\\n`;\n  places.forEach((p, i) => {\n    msg += `${i+1}. ${p.name} — ${p.distance_km} km\\n`;\n  });\n  \n  return {\n    success: true, type: 'nearby',\n    data: { ref_name: refName, places },\n    message: msg.trim()\n  };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi tìm địa điểm lân cận.' };\n}"
+      },
+      "id": "a28828bc-2954-4821-af1a-e7ce884302a0",
+      "name": "Fn_FormatNearby",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127264,
+        102800
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 31: Fn_PrepDirections — V3\n// Extract origin/destination, sanitize + slugify both\n// V3: cleanPlace safety net + origin=dest guard + _routeMode passthrough\n\nfunction cleanPlace(str) {\n  if (!str) return '';\n  return str\n    .normalize('NFC')\n    .replace(/\\s*(?:là\\s+)?(?:bao\\s+(?:xa|nhiêu|nhieu|lâu|lau)|khoảng\\s+cách|khoang\\s+cach|mấy\\s+(?:km|giờ|gio)|may\\s+(?:km|gio)|cách\\s+bao\\s+xa|cach\\s+bao\\s+xa|chỉ\\s+đường|chi\\s+duong|đường\\s+đi|duong\\s+di)(?:\\s+km)?.*$/gi, '')\n    .replace(/\\s*\\?\\s*$/g, '')\n    .trim();\n}\n\nfunction slugify(text) {\n  if (!text) return '';\n  return text\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'd')\n    .toLowerCase().trim()\n    .replace(/[^a-z0-9\\s-]/g, '')\n    .replace(/\\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');\n}\n\nconst cleanOrigin = cleanPlace($json.entity_origin || '');\nconst cleanDest = cleanPlace($json.entity_destination || '');\n\nif (!cleanOrigin && !cleanDest) {\n  return {\n    success: false,\n    type: 'error',\n    data: null,\n    message: 'Không xác định được điểm đi hoặc đến. Vui lòng thử lại.'\n  };\n}\n\nconst originSlug = slugify(cleanOrigin);\nconst destSlug = slugify(cleanDest);\n\n// Guard 1 — Origin = Destination\nif (originSlug && destSlug && originSlug === destSlug) {\n  return {\n    success: false,\n    type: 'error',\n    data: null,\n    message: 'Hai địa điểm trùng nhau. Bạn muốn đi từ đâu đến đâu?'\n  };\n}\n\nreturn {\n  ...$json,\n  origin_slug: originSlug,\n  dest_slug: destSlug,\n  origin_display: cleanOrigin,\n  dest_display: cleanDest,\n  _routeMode: $json._routeMode || 'full'\n};"
+      },
+      "id": "798ff726-b92a-4877-9c53-a666e4da9f1f",
+      "name": "Fn_PrepDirections",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        126592,
+        103184
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT slug, name, latitude, longitude FROM places WHERE slug IN ('{{ $json.origin_slug }}', '{{ $json.dest_slug }}') AND is_active = true",
+        "options": {}
+      },
+      "id": "cba69984-332a-4a7f-ba5f-04c1b3fe7b43",
+      "name": "DB_DirectionCoords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        126816,
+        103184
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 33: Fn_ResolveDirectionCoords\n// Match DB rows to origin/dest by slug, flag unresolved\n\nconst prep = $('Fn_PrepDirections').first()?.json ?? {};\nconst items = $input.all();\nconst rows = items.map(i => i.json).filter(r => r && r.slug);\n\nlet origin = { name: prep.origin_display, lat: null, lng: null, resolved: false };\nlet destination = { name: prep.dest_display, lat: null, lng: null, resolved: false };\n\nfor (const r of rows) {\n  if (r.slug === prep.origin_slug && r.latitude && r.longitude) {\n    origin = { name: r.name, lat: Number(r.latitude), lng: Number(r.longitude), resolved: true };\n  }\n  if (r.slug === prep.dest_slug && r.latitude && r.longitude) {\n    destination = { name: r.name, lat: Number(r.latitude), lng: Number(r.longitude), resolved: true };\n  }\n}\n\nconst allResolved = origin.resolved && destination.resolved;\n\nreturn {\n  ...prep,\n  origin,\n  destination,\n  _allResolved: allResolved,\n  _needOriginGeocode: !origin.resolved,\n  _needDestGeocode: !destination.resolved\n};"
+      },
+      "id": "aa881a1e-3b1e-45ca-8ff9-847a034285c3",
+      "name": "Fn_ResolveDirectionCoords",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127040,
+        103184
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-all-resolved",
+              "leftValue": "={{ $json._allResolved === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b8708160-860a-4add-ad10-8772bd503402",
+      "name": "IF_AllCoordsResolved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        127264,
+        103184
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://geocode.search.hereapi.com/v1/geocode?q={{ encodeURIComponent($json._needOriginGeocode ? $json.origin.name : $json._needDestGeocode ? $json.destination.name : '') }}&limit=1&in=countryCode:VNM&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "f9937781-daf6-47f5-adf4-054ddf73c2b0",
+      "name": "HTTP_HEREGeocode_Direction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        127488,
+        103280
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 36: Fn_ParseDirectionGeocode — V3\n// Merge geocoded coords with existing data\n// V3: deep clone + IF_AllCoordsResolved state for loop safety\n\n// Get accumulated state: prefer IF_AllCoordsResolved (preserves loop state), fallback to Fn_ResolveDirectionCoords\nlet rawData;\ntry { rawData = $('IF_AllCoordsResolved').item.json; } catch(e) { rawData = null; }\nif (!rawData || !rawData.origin) {\n  try { rawData = $('Fn_ResolveDirectionCoords').item.json; } catch(e) { rawData = null; }\n}\n// Deep clone to avoid mutating shared references\nconst data = JSON.parse(JSON.stringify(rawData ?? {}));\n\nconst pos = $json?.items?.[0]?.position;\n\nif (!pos || typeof pos.lat !== 'number' || typeof pos.lng !== 'number') {\n  return { ...data, _geocodeFailed: true };\n}\n\n// Apply to whichever needs geocoding\nif (data._needOriginGeocode) {\n  data.origin = { ...data.origin, lat: pos.lat, lng: pos.lng, resolved: true };\n  data._needOriginGeocode = false;\n} else if (data._needDestGeocode) {\n  data.destination = { ...data.destination, lat: pos.lat, lng: pos.lng, resolved: true };\n  data._needDestGeocode = false;\n}\n\ndata._allResolved = (data.origin?.resolved === true) && (data.destination?.resolved === true);\n\nreturn data;"
+      },
+      "id": "f6e7e78e-f926-44ee-9612-27587b0d1739",
+      "name": "Fn_ParseDirectionGeocode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127712,
+        103280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openrouteservice.org/v2/directions/driving-car",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImJmNDExOGRiMzdkOTQ3MmE5YzZiZjhmNjg1ZDQ0ZTg4IiwiaCI6Im11cm11cjY0In0="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ coordinates: [[$json.origin?.lng || $json.origin_lng, $json.origin?.lat || $json.origin_lat], [$json.destination?.lng || $json.dest_lng, $json.destination?.lat || $json.dest_lat]] }) }}",
+        "options": {
+          "timeout": 4000
+        }
+      },
+      "id": "c3743014-9152-4694-bca7-db68608d50ff",
+      "name": "HTTP_ORS_Route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        127936,
+        103184
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 38: Fn_FormatDirections — V3\n// Mode-aware: distance_only vs full\n// V3: NaN guard, same-coords guard, haversine fallback\n\nfunction haversine(lat1, lon1, lat2, lon2) {\n  const R = 6371;\n  const dLat = (lat2 - lat1) * Math.PI / 180;\n  const dLon = (lon2 - lon1) * Math.PI / 180;\n  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;\n  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));\n}\n\ntry {\n  const route = $json;\n  let dirData;\n  \n  let coordData;\n  try { coordData = $('Fn_ParseDirectionGeocode').item.json; } catch(e) { coordData = null; }\n  try { if (!coordData) coordData = $('Fn_ResolveDirectionCoords').item.json; } catch(e) {}\n  if (!coordData) coordData = {};\n  \n  const origin = coordData.origin || {};\n  const dest = coordData.destination || {};\n  \n  // Guard: both coords must be valid numbers\n  const oLat = typeof origin.lat === 'number' ? origin.lat : null;\n  const oLng = typeof origin.lng === 'number' ? origin.lng : null;\n  const dLat2 = typeof dest.lat === 'number' ? dest.lat : null;\n  const dLng2 = typeof dest.lng === 'number' ? dest.lng : null;\n  \n  if (oLat === null || oLng === null || dLat2 === null || dLng2 === null) {\n    return {\n      success: false, type: 'error', data: null,\n      message: 'Không thể tính khoảng cách. Không tìm thấy tọa độ hợp lệ của địa điểm.'\n    };\n  }\n  \n  // Guard: same coordinates — geocode resolved to same point\n  if (Math.abs(oLat - dLat2) < 0.001 && Math.abs(oLng - dLng2) < 0.001) {\n    return {\n      success: false, type: 'error', data: null,\n      message: 'Hai địa điểm có cùng tọa độ. Vui lòng kiểm tra lại tên điểm đi và đến.'\n    };\n  }\n  \n  const originName = origin.name || coordData.origin_display || 'Điểm đi';\n  const destName = dest.name || coordData.dest_display || 'Điểm đến';\n  \n  if (route?.routes?.[0]?.summary && typeof route.routes[0].summary.distance === 'number' && route.routes[0].summary.distance > 0) {\n    const s = route.routes[0].summary;\n    dirData = {\n      origin: { name: originName, lat: oLat, lng: oLng },\n      destination: { name: destName, lat: dLat2, lng: dLng2 },\n      distance_km: Math.round(s.distance / 100) / 10,\n      duration_min: Math.round((s.duration || 0) / 60),\n      source: 'ORS'\n    };\n  } else {\n    const dist = haversine(oLat, oLng, dLat2, dLng2);\n    dirData = {\n      origin: { name: originName, lat: oLat, lng: oLng },\n      destination: { name: destName, lat: dLat2, lng: dLng2 },\n      distance_km: Math.round(dist * 10) / 10,\n      duration_min: Math.round(dist / 40 * 60),\n      source: 'haversine_estimate'\n    };\n  }\n  \n  // Final NaN guard\n  if (isNaN(dirData.distance_km) || isNaN(dirData.duration_min)) {\n    return {\n      success: false, type: 'error', data: null,\n      message: 'Không thể tính khoảng cách giữa hai địa điểm.'\n    };\n  }\n  \n  // V3: Mode-aware response\n  const routeMode = coordData._routeMode || coordData.routeMode || 'full';\n  \n  if (routeMode === 'distance_only') {\n    const msg = 'Khoảng cách từ ' + dirData.origin.name + ' đến ' + dirData.destination.name + ': ' + dirData.distance_km + ' km, khoảng ' + dirData.duration_min + ' phút lái xe.';\n    return { success: true, type: 'distance', data: dirData, message: msg };\n  } else {\n    const mapsLink = 'https://www.google.com/maps/dir/' + oLat + ',' + oLng + '/' + dLat2 + ',' + dLng2;\n    dirData.maps_link = mapsLink;\n    const msg = 'Từ ' + dirData.origin.name + ' đến ' + dirData.destination.name + ': ' + dirData.distance_km + ' km, khoảng ' + dirData.duration_min + ' phút lái xe.';\n    return { success: true, type: 'directions', data: dirData, message: msg };\n  }\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi tính đường đi: ' + (e.message || '') };\n}"
+      },
+      "id": "b6a952cf-02b8-4d4a-8798-f476bb933db0",
+      "name": "Fn_FormatDirections",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        103184
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 39: Fn_PrepTour\n// Extract duration_days, compute entity slug, build filtered tour query\n// D8: duration parse guard\n\nfunction slugify(text) {\n  if (!text) return '';\n  return text\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'd')\n    .toLowerCase().trim()\n    .replace(/[^a-z0-9\\s-]/g, '')\n    .replace(/\\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');\n}\n\nlet duration = null;\nconst match = ($json.message || '').match(/(\\d+)\\s*ngày/);\nif (match) {\n  duration = parseInt(match[1], 10);\n  if (isNaN(duration) || duration < 1 || duration > 30) duration = null;\n}\n\nconst duration_days = $json.duration_days || duration;\nconst entityRaw = $json.entity || '';\nconst _entitySlug = slugify(entityRaw);\n\n// Build dynamic SQL — filters added only when values exist\nlet sql = \"SELECT t.name, t.duration_days, t.price, t.description, t.highlights, json_agg(json_build_object('place', p.name, 'order', td.visit_order)) as destinations FROM tours t LEFT JOIN tour_destinations td ON td.tour_id = t.id LEFT JOIN places p ON p.id = td.place_id WHERE t.is_active = true\";\nif (duration_days) {\n  sql += \" AND t.duration_days = \" + parseInt(duration_days, 10);\n}\nif (_entitySlug) {\n  sql += \" AND t.id IN (SELECT td2.tour_id FROM tour_destinations td2 JOIN places p2 ON p2.id = td2.place_id WHERE p2.slug = '\" + _entitySlug + \"')\";\n}\nsql += \" GROUP BY t.id ORDER BY t.duration_days LIMIT 5\";\n\nreturn {\n  ...$json,\n  duration_days,\n  tourLocation: entityRaw || 'Ninh Bình',\n  _entitySlug,\n  _tourQuery: sql\n};"
+      },
+      "id": "d40209f4-17b6-4fd8-82be-7b137a6eaffa",
+      "name": "Fn_PrepTour",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127488,
+        103536
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-has-duration",
+              "leftValue": "={{ ($json.duration_days != null) || (typeof $json._entitySlug === 'string' && $json._entitySlug.length > 0) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b7bb9e21-658f-4942-bd4a-0b1cb52bd577",
+      "name": "IF_HasDuration",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        127712,
+        103536
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json._tourQuery }}",
+        "options": {}
+      },
+      "id": "11f37972-1c7b-4e21-8db1-27872b88aab2",
+      "name": "DB_LookupTourFiltered",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        127936,
+        103472
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT t.name, t.duration_days, t.price, t.description, t.highlights,\n  json_agg(json_build_object('place', p.name, 'order', td.visit_order)) as destinations\nFROM tours t\nLEFT JOIN tour_destinations td ON td.tour_id = t.id\nLEFT JOIN places p ON p.id = td.place_id\nWHERE t.is_active = true\nGROUP BY t.id ORDER BY t.duration_days LIMIT 5",
+        "options": {}
+      },
+      "id": "3b7af140-4c4e-4699-a9d6-5a52aa26d828",
+      "name": "DB_LookupTourAll",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        127936,
+        103664
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 41: Fn_FormatTour\n// Multi-row. 0-row handling.\n\ntry {\n  const items = $input.all();\n  const rows = items.map(i => i.json).filter(r => r && r.name);\n  const prep = $('Fn_PrepTour').first()?.json ?? {};\n  \n  if (rows.length === 0) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy tour phù hợp' + (prep.duration_days ? ` ${prep.duration_days} ngày` : '') + (prep.tourLocation && prep.tourLocation !== 'Ninh Bình' ? ` qua ${prep.tourLocation}` : '') + '.'\n    };\n  }\n  \n  const tours = rows.map(r => ({\n    name: r.name,\n    duration_days: r.duration_days,\n    price: r.price || 0,\n    description: r.description || '',\n    highlights: r.highlights || '',\n    destinations: r.destinations || []\n  }));\n  \n  let msg = tours.length === 1\n    ? `Tour: ${tours[0].name} (${tours[0].duration_days} ngày) — ${tours[0].price?.toLocaleString('vi-VN')}đ. ${tours[0].description}`\n    : `Tìm thấy ${tours.length} tour:\\n` + tours.map((t, i) => `${i+1}. ${t.name} (${t.duration_days} ngày) — ${t.price?.toLocaleString('vi-VN')}đ`).join('\\n');\n  \n  return {\n    success: true, type: 'tour',\n    data: { tours },\n    message: msg\n  };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi tìm tour.' };\n}"
+      },
+      "id": "d10293d2-48f6-4786-adb6-86f4f7c4d9c9",
+      "name": "Fn_FormatTour",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        103536
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node 42: Fn_FallbackResponse\n// A14: success: true, type: 'help'\n// Uses _clarifyMessage from ValidateContext if available\n\nreturn {\n  success: true,\n  type: 'help',\n  data: {\n    supported_intents: ['GET_PLACE_INFO', 'GET_OPENING_HOURS', 'GET_TICKET_PRICE',\n      'GET_WEATHER', 'SEARCH_NEARBY', 'GET_DIRECTIONS', 'SEARCH_TOUR'],\n    _originalIntent: $json._originalIntent || null,\n    _missingFields: $json._missingFields || null\n  },\n  message: $json._clarifyMessage || 'Xin lỗi, tôi chưa hiểu yêu cầu của bạn. Tôi có thể giúp bạn:\\n• Thông tin địa điểm: \"Tràng An có gì hay?\"\\n• Giờ mở cửa: \"Chùa Bái Đính mở cửa lúc mấy giờ?\"\\n• Giá vé: \"Giá vé Tràng An bao nhiêu?\"\\n• Thời tiết: \"Thời tiết Ninh Bình hôm nay\"\\n• Địa điểm gần: \"Địa điểm gần Tràng An\"\\n• Chỉ đường: \"Từ Tràng An đến Bái Đính\"\\n• Tour: \"Tour 2 ngày Ninh Bình\"'\n};"
+      },
+      "id": "e26aad0d-e2c4-47a8-b9b1-c2fb8a363399",
+      "name": "Fn_FallbackResponse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128384,
+        103760
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'google/gemini-2.0-flash-001', temperature: 0.3, max_tokens: 500, messages: [{ role: 'system', content: 'Bạn là trợ lý du lịch Ninh Bình thân thiện. Viết lại dữ liệu JSON thành đoạn văn tiếng Việt tự nhiên, dễ đọc. KHÔNG bịa thêm thông tin, chỉ dùng dữ liệu được cung cấp. Dùng emoji phù hợp. Giới hạn 300 từ.' }, { role: 'user', content: 'Dữ liệu gốc (JSON):\\n' + JSON.stringify($json) + '\\n\\nHãy viết lại thành đoạn văn tiếng Việt tự nhiên dựa trên dữ liệu trên.' }] }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "02ca5650-7b50-45f1-aeac-142d1306b26b",
+      "name": "HTTP_ResponseComposer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        128384,
+        101328
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 44: Fn_BuildFinalResponse\n// C1: .find() not for loop — deterministic, no overwrite\n// A9: LLM-independent fallback via source.message\n// C5: fuzzy hallucination guard\n\nconst items = $input.all();\n\n// C1 — Deterministic .find()\nconst service = items.find(i => i.json?.type && i.json?.success !== undefined);\nconst llmItem = items.find(i => i.json?.choices?.[0]?.message?.content);\n\nconst source = service?.json || {};\nlet llmText = llmItem?.json?.choices?.[0]?.message?.content || '';\n\n// C5 — Fuzzy hallucination guard\nif (llmText && source.data?.name) {\n  const nameParts = source.data.name.toLowerCase().split(/\\s+/);\n  const llmLower = llmText.toLowerCase();\n  const hasFirstWord = nameParts.length > 0 && llmLower.includes(nameParts[0]);\n  const hasLastWord = nameParts.length > 1 && llmLower.includes(nameParts[nameParts.length - 1]);\n  if (!hasFirstWord && !hasLastWord) {\n    llmText = ''; // LLM hallucinated — discard\n  }\n}\n\nconst finalMessage = llmText || source.message || 'Không có dữ liệu.';\n\n// Latency (A1)\nlet webhookTime = null;\ntry { webhookTime = $('Fn_ValidateInput').first()?.json?._webhookTime; } catch(e) {}\nconst latencyMs = webhookTime ? Date.now() - webhookTime : null;\n\n// Pass sessionId for DB_WriteLog\nlet sessionId = 'unknown';\ntry { sessionId = $('Fn_ValidateInput').first()?.json?.sessionId || 'unknown'; } catch(e) {}\n\nreturn {\n  success: source.success ?? false,\n  type: source.type || 'unknown',\n  data: source.data || null,\n  message: finalMessage,\n  _latencyMs: latencyMs,\n  _sessionId: sessionId\n};"
+      },
+      "id": "77ff7855-2418-45a4-9c0d-a1869b403231",
+      "name": "Fn_BuildFinalResponse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128608,
+        102416
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: $json.success, type: $json.type, data: $json.data, message: $json.message }) }}",
+        "options": {}
+      },
+      "id": "60514886-7816-4ac4-83e8-e53c80c87eb0",
+      "name": "Respond_Final",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        128832,
+        102320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO search_logs (session_id, intent, entity, source, latency_ms, fallback_triggered, created_at)\nVALUES (\n  '{{ $json._sessionId || 'unknown' }}',\n  '{{ $json.type || 'unknown' }}',\n  '{{ ($json.data?.name || '').replace(/'/g, \"''\") }}',\n  '{{ $json._source || 'workflow' }}',\n  {{ $json._latencyMs || 0 }},\n  {{ $json.type === 'help' ? true : false }},\n  NOW()\n)",
+        "options": {}
+      },
+      "id": "fd20391b-49fd-4f2d-b21f-1891d6ec19f5",
+      "name": "DB_WriteLog",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        128832,
+        102512
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "f3535673-1432-4676-9876-461dc6f07ab6",
+      "name": "ErrorTrigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        124128,
+        101104
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, type: 'system_error', data: null, message: 'Xin lỗi, hệ thống đang gặp sự cố. Vui lòng thử lại sau.' }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "da57f307-253e-42b2-a982-080456c07ebf",
+      "name": "Respond_SystemError",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        124352,
+        101104
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT alias, canonical_name FROM location_aliases\nWHERE alias IN (\n  LOWER(TRIM('{{ $json.entity || \"\" }}')),\n  LOWER(TRIM('{{ $json.entity_origin || \"\" }}')),\n  LOWER(TRIM('{{ $json.entity_destination || \"\" }}'))\n)",
+        "options": {}
+      },
+      "id": "e899d8be-178b-4674-b8aa-871bfa50862e",
+      "name": "DB_ResolveAliases",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        125920,
+        102432
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node: Fn_ApplyAliases\n// Resolve entity aliases from DB lookup\n// runOnceForAllItems — receives alias rows from DB_ResolveAliases\n\nconst items = $input.all();\nconst aliasRows = items.map(i => i.json).filter(r => r && r.alias && r.canonical_name);\n\nlet upstream;\ntry { upstream = $('Fn_ValidateContext').first()?.json; } catch(e) { upstream = null; }\nif (!upstream) {\n  return items.length > 0 ? items[0].json : {};\n}\n\nif (!aliasRows.length) {\n  return upstream;\n}\n\nconst aliasMap = {};\nfor (const row of aliasRows) {\n  aliasMap[row.alias.toLowerCase().trim()] = row.canonical_name;\n}\n\nconst result = { ...upstream };\n\nif (result.entity) {\n  const key = result.entity.toLowerCase().trim();\n  if (aliasMap[key]) {\n    result._originalEntity = result.entity;\n    result.entity = aliasMap[key];\n  }\n}\n\nif (result.entity_origin) {\n  const key = result.entity_origin.toLowerCase().trim();\n  if (aliasMap[key]) {\n    result._originalOrigin = result.entity_origin;\n    result.entity_origin = aliasMap[key];\n  }\n}\n\nif (result.entity_destination) {\n  const key = result.entity_destination.toLowerCase().trim();\n  if (aliasMap[key]) {\n    result._originalDestination = result.entity_destination;\n    result.entity_destination = aliasMap[key];\n  }\n}\n\nreturn result;"
+      },
+      "id": "bfa0f7c4-bdd8-46d5-9139-124d6bee328d",
+      "name": "Fn_ApplyAliases",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        126144,
+        102432
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-place-id",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "552d317e-9107-4a6a-854a-acc7c1a57c15",
+      "name": "IF_PlaceFound",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        127712,
+        101472
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://discover.search.hereapi.com/v1/discover?q={{ encodeURIComponent($('Fn_PrepPlaceInfo').item.json.entityDisplay || '') }}&at=20.25,105.97&in=countryCode:VNM&limit=1&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "9b985622-b5de-4d5c-a046-864258a67884",
+      "name": "HTTP_HEREDiscover",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        127936,
+        101616
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node: Fn_CacheAndFormat\n// Parse HERE Discover response, format as place_info\n// runOnceForEachItem\n\ntry {\n  const items = $json?.items;\n  let prep;\n  try { prep = $('Fn_PrepPlaceInfo').item.json; } catch(e) { prep = {}; }\n\n  if (!items || !Array.isArray(items) || items.length === 0) {\n    return {\n      success: false,\n      type: 'not_found',\n      data: null,\n      message: 'Không tìm thấy thông tin về ' + (prep.entityDisplay || 'địa điểm này') + '.'\n    };\n  }\n\n  const place = items[0];\n  const pos = place?.position;\n  const addr = place?.address;\n  const cats = place?.categories;\n\n  const data = {\n    name: place.title || prep.entityDisplay || 'Không rõ',\n    description: addr?.label || '',\n    coordinates: (pos?.lat != null && pos?.lng != null) ? { lat: pos.lat, lng: pos.lng } : null,\n    category: cats?.[0]?.name || null,\n    address: addr?.label || null,\n    source: 'api',\n    ticket_price: null,\n    opening_hours: null\n  };\n\n  const msg = data.name + ': ' + (data.description || 'Không có mô tả chi tiết.') +\n    (data.category ? ' (Loại: ' + data.category + ')' : '') +\n    '\\nLưu ý: Thông tin này từ nguồn bên ngoài, có thể không đầy đủ như dữ liệu chính thức.';\n\n  return {\n    success: true,\n    type: 'place_info',\n    data: data,\n    message: msg,\n    _cacheInsert: {\n      name: data.name,\n      slug: null,\n      latitude: pos?.lat || null,\n      longitude: pos?.lng || null,\n      description: data.description,\n      data_source: 'api',\n      province: addr?.county || addr?.state || null\n    }\n  };\n} catch(e) {\n  return {\n    success: false,\n    type: 'error',\n    data: null,\n    message: 'Lỗi khi tra cứu thông tin địa điểm từ nguồn bên ngoài.'\n  };\n}"
+      },
+      "id": "1115b7c9-d9e8-4a7d-8a6c-608d574dbb68",
+      "name": "Fn_CacheAndFormat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        101616
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-hours-found",
+              "leftValue": "={{ $json.day_of_week }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2a64a9e8-992a-414c-8070-c569aea2ab51",
+      "name": "IF_HoursFound",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        127712,
+        101888
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://discover.search.hereapi.com/v1/discover?q={{ encodeURIComponent($('Fn_PrepOpenHours').item.json.entityDisplay || '') }}&at=20.25,105.97&in=countryCode:VNM&limit=1&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "d7673e06-bb2a-46db-9e3e-2848e8173810",
+      "name": "HTTP_HEREDiscover_Hours",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        127936,
+        102000
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node: Fn_FormatHoursFromAPI\n// Parse HERE Discover response for opening hours\n// runOnceForEachItem\n\ntry {\n  const hereItems = $json?.items;\n  let prep;\n  try { prep = $('Fn_PrepOpenHours').item.json; } catch(e) { prep = {}; }\n\n  if (!hereItems || !Array.isArray(hereItems) || hereItems.length === 0) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy giờ mở cửa của ' + (prep.entityDisplay || 'địa điểm này') + '.'\n    };\n  }\n\n  const place = hereItems[0];\n  const placeName = place.title || prep.entityDisplay || 'Không rõ';\n  const oh = place.openingHours;\n\n  if (!oh || (!oh.text && !oh.isOpen)) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy giờ mở cửa của ' + placeName + '.'\n    };\n  }\n\n  const scheduleText = oh.text ? oh.text.join('\\n') : '';\n  const isOpenNow = oh.isOpen != null ? (oh.isOpen ? 'Đang mở cửa' : 'Đang đóng cửa') : 'Không rõ';\n\n  const msg = placeName + ' — Hiện tại: ' + isOpenNow + '.'\n    + (scheduleText ? '\\n' + scheduleText : '')\n    + '\\nLưu ý: Giờ mở cửa lấy từ nguồn bên ngoài, có thể không chính xác.';\n\n  return {\n    success: true, type: 'opening_hours',\n    data: {\n      name: placeName,\n      today: isOpenNow,\n      schedule: scheduleText,\n      source: 'api'\n    },\n    message: msg\n  };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi tra cứu giờ mở cửa từ nguồn bên ngoài.' };\n}"
+      },
+      "id": "571e875b-35df-4f07-8cc9-e78c959dbebc",
+      "name": "Fn_FormatHoursFromAPI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        102000
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node: IF_NearbyEnough\n// Check if DB returned >= 3 results. If not, flag for HERE fallback.\n// runOnceForAllItems\n\nconst items = $input.all();\nconst formatResult = items[0]?.json;\n\nif (formatResult?.success === true && formatResult?.data?.places?.length >= 3) {\n  return { ...formatResult, _needNearbyFallback: false };\n}\n\nlet prep;\ntry { prep = $('Fn_PrepNearby').first()?.json; } catch(e) { prep = {}; }\n\nreturn {\n  ...formatResult,\n  _needNearbyFallback: true,\n  _nearbyEntity: prep?.entityDisplay || '',\n  _nearbyLat: prep?._gpsLat || null,\n  _nearbyLng: prep?._gpsLng || null\n};"
+      },
+      "id": "d36f0a50-8257-4cf3-9bc9-4e0e221a2af2",
+      "name": "IF_NearbyEnough",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        127488,
+        102800
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-nearby-fallback",
+              "leftValue": "={{ $json._needNearbyFallback }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "cb3a245c-307f-4b49-8d6a-ee73fe6b59b1",
+      "name": "IF_NeedNearbyFallback",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        127712,
+        102800
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://discover.search.hereapi.com/v1/discover?q=tourist+attraction&at={{ $json._nearbyLat || 20.25 }},{{ $json._nearbyLng || 105.97 }}&in=countryCode:VNM&limit=5&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "9e8a14a2-fb69-42d9-91a9-0343f8ffcddd",
+      "name": "HTTP_HEREDiscover_Nearby",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        127936,
+        102992
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node: Fn_MergeNearbyResults\n// Merge HERE Discover nearby with existing DB results (if any)\n// Filter by tourist-relevant categories only\n// runOnceForEachItem\n\ntry {\n  const hereItems = $json?.items;\n  let prep;\n  try { prep = $('Fn_PrepNearby').first()?.json; } catch(e) { prep = {}; }\n  const refName = prep?.entityDisplay || 'đây';\n\n  let existingPlaces = [];\n  try {\n    const upstream = $('IF_NearbyEnough').first()?.json;\n    if (upstream?.data?.places) {\n      existingPlaces = upstream.data.places;\n    }\n  } catch(e) {}\n\n  const allowedCategories = [\n    'tourist attraction', 'landmark', 'temple', 'museum',\n    'natural feature', 'park', 'historical', 'cultural',\n    'religious', 'monument', 'scenic', 'pagoda', 'church',\n    'sightseeing', 'leisure', 'recreation'\n  ];\n\n  const herePlaces = [];\n  if (hereItems && Array.isArray(hereItems)) {\n    for (const item of hereItems) {\n      const cats = item.categories || [];\n      const catNames = cats.map(c => (c.name || '').toLowerCase());\n      const isRelevant = catNames.some(cn =>\n        allowedCategories.some(ac => cn.includes(ac))\n      );\n      if (!isRelevant && cats.length > 0) continue;\n\n      const pos = item.position;\n      herePlaces.push({\n        name: item.title || 'Không rõ',\n        slug: null,\n        description: item.address?.label || '',\n        place_type: catNames[0] || 'landmark',\n        distance_km: item.distance ? (item.distance / 1000).toFixed(2) : null,\n        source: 'api'\n      });\n    }\n  }\n\n  const existingNames = new Set(existingPlaces.map(p => p.name.toLowerCase()));\n  const merged = [...existingPlaces];\n  for (const hp of herePlaces) {\n    if (!existingNames.has(hp.name.toLowerCase())) {\n      merged.push(hp);\n      existingNames.add(hp.name.toLowerCase());\n    }\n  }\n\n  if (merged.length === 0) {\n    return {\n      success: false, type: 'not_found', data: null,\n      message: 'Không tìm thấy địa điểm gần ' + refName + '.'\n    };\n  }\n\n  let msg = 'Các địa điểm gần ' + refName + ':\\n';\n  merged.forEach((p, i) => {\n    msg += (i + 1) + '. ' + p.name;\n    if (p.distance_km) msg += ' — ' + p.distance_km + ' km';\n    if (p.source === 'api') msg += ' (nguồn bên ngoài)';\n    msg += '\\n';\n  });\n\n  const hasApiData = merged.some(p => p.source === 'api');\n  if (hasApiData) {\n    msg += '\\nLưu ý: Một số kết quả từ nguồn bên ngoài.';\n  }\n\n  return {\n    success: true, type: 'nearby',\n    data: { ref_name: refName, places: merged },\n    message: msg.trim()\n  };\n} catch(e) {\n  return { success: false, type: 'error', data: null, message: 'Lỗi khi tìm địa điểm lân cận.' };\n}"
+      },
+      "id": "df2bab9e-fd75-486f-a872-fe83b25fd48b",
+      "name": "Fn_MergeNearbyResults",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        102992
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-ticket-type",
+              "leftValue": "={{ $json.ticket_type }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d1e4a001-1f01-4a01-b001-ticket-found",
+      "name": "IF_TicketFound",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        128160,
+        102192
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://discover.search.hereapi.com/v1/discover?q={{ encodeURIComponent($('Fn_PrepTicketPrice').item.json.entityDisplay || '') }}&at=20.25,105.97&in=countryCode:VNM&limit=1&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "d1e4a002-1f02-4a02-b002-here-ticket",
+      "name": "HTTP_HEREDiscover_Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        128384,
+        102288
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Node: Fn_FormatTicketFromAPI\n// Parse HERE Discover response for ticket price fallback\n// HERE does NOT provide ticket prices — use category-based LLM estimate\n\ntry {\n  const items = $json?.items;\n  let prep;\n  try { prep = $('Fn_PrepTicketPrice').item.json; } catch(e) { prep = {}; }\n  const entityName = prep.entityDisplay || 'địa điểm này';\n\n  if (!items || !Array.isArray(items) || items.length === 0) {\n    return {\n      success: false,\n      type: 'not_found',\n      data: null,\n      message: 'Không tìm thấy thông tin giá vé của ' + entityName + '. Bạn có thể thử tìm trên website chính thức của địa điểm.'\n    };\n  }\n\n  const place = items[0];\n  const addr = place?.address;\n  const cats = place?.categories || [];\n  const contacts = place?.contacts || [];\n  const phone = contacts?.[0]?.phone?.[0]?.value || null;\n  const website = contacts?.[0]?.www?.[0]?.value || null;\n  const catName = cats?.[0]?.name || null;\n  const pos = place?.position;\n\n  // Category-based price estimation (Vietnam typical ranges)\n  const PRICE_ESTIMATES = {\n    'museum': { range: '30.000 – 50.000 VNĐ', note: 'bảo tàng' },\n    'historical monument': { range: '30.000 – 80.000 VNĐ', note: 'di tích lịch sử' },\n    'park-recreation-area': { range: '20.000 – 100.000 VNĐ', note: 'khu vui chơi' },\n    'natural-geographical': { range: '50.000 – 200.000 VNĐ', note: 'danh lam thắng cảnh' },\n    'temple': { range: 'Miễn phí – 50.000 VNĐ', note: 'đền/chùa' },\n    'pagoda': { range: 'Miễn phí – 50.000 VNĐ', note: 'chùa' },\n    'tourist-attraction': { range: '50.000 – 200.000 VNĐ', note: 'điểm du lịch' },\n    'leisure': { range: '50.000 – 150.000 VNĐ', note: 'khu giải trí' }\n  };\n\n  // Find matching estimate from HERE category\n  let estimate = null;\n  const catIdLower = (cats?.[0]?.id || '').toLowerCase();\n  const catNameLower = (catName || '').toLowerCase();\n  for (const [key, val] of Object.entries(PRICE_ESTIMATES)) {\n    if (catIdLower.includes(key) || catNameLower.includes(key)) {\n      estimate = val;\n      break;\n    }\n  }\n  if (!estimate) {\n    estimate = { range: '30.000 – 150.000 VNĐ', note: 'ước tính chung' };\n  }\n\n  const data = {\n    name: place.title || entityName,\n    category: catName,\n    address: addr?.label || null,\n    coordinates: (pos?.lat != null && pos?.lng != null) ? { lat: pos.lat, lng: pos.lng } : null,\n    estimated_price: estimate.range,\n    price_note: estimate.note,\n    website: website,\n    phone: phone,\n    source: 'api_estimate'\n  };\n\n  let msg = '🎫 Giá vé ' + data.name + ' hiện chưa có trong hệ thống.\\n\\n';\n  msg += 'Theo thông tin tham khảo:\\n';\n  if (catName) msg += '• Loại địa điểm: ' + catName + '\\n';\n  if (addr?.label) msg += '• Khu vực: ' + addr.label + '\\n';\n  msg += '\\n💰 Giá vé ước tính: ' + estimate.range + ' (' + estimate.note + ')\\n';\n  if (website) msg += '\\n🌐 Website: ' + website;\n  if (phone) msg += '\\n📞 Liên hệ: ' + phone;\n  msg += '\\n\\n⚠️ Lưu ý: Đây là giá ước tính, vui lòng kiểm tra trực tiếp với địa điểm để có giá chính xác.';\n\n  return {\n    success: true,\n    type: 'ticket_price',\n    data: data,\n    message: msg\n  };\n} catch(e) {\n  return {\n    success: false,\n    type: 'error',\n    data: null,\n    message: 'Lỗi khi tra cứu thông tin giá vé từ nguồn bên ngoài.'\n  };\n}"
+      },
+      "id": "d1e4a003-1f03-4a03-b003-format-ticket-api",
+      "name": "Fn_FormatTicketFromAPI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128608,
+        102288
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook_Receive": {
+      "main": [
+        [
+          {
+            "node": "Fn_ValidateInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ValidateInput": {
+      "main": [
+        [
+          {
+            "node": "IF_InputValid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_InputValid": {
+      "main": [
+        [
+          {
+            "node": "Fn_DetectIntentRule",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond_InvalidInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_DetectIntentRule": {
+      "main": [
+        [
+          {
+            "node": "IF_RuleMatched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_RuleMatched": {
+      "main": [
+        [
+          {
+            "node": "Fn_ValidateContext",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_LLMClassify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_LLMClassify": {
+      "main": [
+        [
+          {
+            "node": "Fn_NormalizeLLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NormalizeLLM": {
+      "main": [
+        [
+          {
+            "node": "Fn_ValidateContext",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ValidateContext": {
+      "main": [
+        [
+          {
+            "node": "DB_ResolveAliases",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_Intent": {
+      "main": [
+        [
+          {
+            "node": "Fn_PrepPlaceInfo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_PrepOpenHours",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_PrepTicketPrice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_PrepWeather",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_PrepNearby",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_PrepDirections",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_PrepTour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PrepPlaceInfo": {
+      "main": [
+        [
+          {
+            "node": "DB_LookupPlace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupPlace": {
+      "main": [
+        [
+          {
+            "node": "IF_PlaceFound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatPlaceInfo": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PrepOpenHours": {
+      "main": [
+        [
+          {
+            "node": "DB_LookupOpenHours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupOpenHours": {
+      "main": [
+        [
+          {
+            "node": "IF_HoursFound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatOpenHours": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PrepTicketPrice": {
+      "main": [
+        [
+          {
+            "node": "DB_LookupTicket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupTicket": {
+      "main": [
+        [
+          {
+            "node": "IF_TicketFound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_TicketFound": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatTicketPrice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_HEREDiscover_Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_HEREDiscover_Ticket": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatTicketFromAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatTicketFromAPI": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatTicketPrice": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PrepWeather": {
+      "main": [
+        [
+          {
+            "node": "DB_WeatherCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_WeatherCoords": {
+      "main": [
+        [
+          {
+            "node": "Fn_ResolveWeatherCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ResolveWeatherCoords": {
+      "main": [
+        [
+          {
+            "node": "IF_NeedGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NeedGeocode": {
+      "main": [
+        [
+          {
+            "node": "HTTP_HEREGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_WeatherAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_HEREGeocode": {
+      "main": [
+        [
+          {
+            "node": "Fn_ParseGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseGeocode": {
+      "main": [
+        [
+          {
+            "node": "HTTP_WeatherAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_WeatherAPI": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatWeather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatWeather": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PrepNearby": {
+      "main": [
+        [
+          {
+            "node": "IF_NearbyGPS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NearbyGPS": {
+      "main": [
+        [
+          {
+            "node": "DB_NearbyByGPS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DB_NearbyPlaces",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_NearbyByGPS": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatNearby",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_NearbyPlaces": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatNearby",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatNearby": {
+      "main": [
+        [
+          {
+            "node": "IF_NearbyEnough",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PrepDirections": {
+      "main": [
+        [
+          {
+            "node": "DB_DirectionCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_DirectionCoords": {
+      "main": [
+        [
+          {
+            "node": "Fn_ResolveDirectionCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ResolveDirectionCoords": {
+      "main": [
+        [
+          {
+            "node": "IF_AllCoordsResolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_AllCoordsResolved": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ORS_Route",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_HEREGeocode_Direction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_HEREGeocode_Direction": {
+      "main": [
+        [
+          {
+            "node": "Fn_ParseDirectionGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseDirectionGeocode": {
+      "main": [
+        [
+          {
+            "node": "IF_AllCoordsResolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_ORS_Route": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatDirections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatDirections": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PrepTour": {
+      "main": [
+        [
+          {
+            "node": "IF_HasDuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_HasDuration": {
+      "main": [
+        [
+          {
+            "node": "DB_LookupTourFiltered",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DB_LookupTourAll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupTourFiltered": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatTour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupTourAll": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatTour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatTour": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FallbackResponse": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_ResponseComposer": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_BuildFinalResponse": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DB_WriteLog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ErrorTrigger": {
+      "main": [
+        [
+          {
+            "node": "Respond_SystemError",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_ResolveAliases": {
+      "main": [
+        [
+          {
+            "node": "Fn_ApplyAliases",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ApplyAliases": {
+      "main": [
+        [
+          {
+            "node": "Switch_Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_PlaceFound": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatPlaceInfo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_HEREDiscover",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_HEREDiscover": {
+      "main": [
+        [
+          {
+            "node": "Fn_CacheAndFormat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_CacheAndFormat": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_HoursFound": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatOpenHours",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_HEREDiscover_Hours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_HEREDiscover_Hours": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatHoursFromAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatHoursFromAPI": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NearbyEnough": {
+      "main": [
+        [
+          {
+            "node": "IF_NeedNearbyFallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NeedNearbyFallback": {
+      "main": [
+        [
+          {
+            "node": "HTTP_HEREDiscover_Nearby",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_HEREDiscover_Nearby": {
+      "main": [
+        [
+          {
+            "node": "Fn_MergeNearbyResults",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_MergeNearbyResults": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8298d6d82438e8d5ee28189bff4aaace26c9e5a75151cb6d6f4c18d7bb992ea7"
+  }
+}

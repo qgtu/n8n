@@ -1,0 +1,1433 @@
+{
+  "name": "Production Travel Bot (Clean Architecture)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "travel-bot",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "webhook-receive",
+      "name": "Webhook_Receive",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        600
+      ],
+      "webhookId": "travel-bot"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== API GATEWAY: Validate & Normalize Input =====\n// INPUT: raw webhook body\n// OUTPUT: { sessionId, message, messageLower, userLocation, _startTime }\n// WHY: Single source of truth â€” all downstream nodes use $json.message\n\nconst body = $json.body || {};\nconst query = $json.query || {};\nconst headers = $json.headers || {};\n\n// Session ID\nlet sessionId = body.sessionId || query.sessionId || headers['x-session-id'];\nif (!sessionId) {\n  sessionId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;\n}\n\n// Message validation\nconst rawMessage = body.message || body.text || '';\nif (!rawMessage || typeof rawMessage !== 'string' || !rawMessage.trim()) {\n  return {\n    _valid: false,\n    sessionId,\n    error: 'Message is required',\n    _startTime: Date.now()\n  };\n}\n\nconst message = rawMessage.trim();\nconst messageLower = message.toLowerCase();\nconst userLocation = body.user_location || null;\n\nreturn {\n  _valid: true,\n  sessionId,\n  message,\n  messageLower,\n  userLocation,\n  _startTime: Date.now()\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-validate-input",
+      "name": "Fn_ValidateInput",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "check-valid",
+              "leftValue": "={{ $json._valid === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-input-valid",
+      "name": "IF_InputValid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        640,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ intent: 'error', response_to_user: $json.error || 'Vui lÃ²ng gá»­i tin nháº¯n há»£p lá»‡.', type: 'validation_error' }) }}",
+        "options": {}
+      },
+      "id": "respond-invalid",
+      "name": "Respond_InvalidInput",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        860,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"google/gemini-2.0-flash-001\",\n  \"temperature\": 0,\n  \"max_tokens\": 300,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an intent classifier for a Vietnamese travel assistant. Classify the user message into exactly ONE intent and extract entities. Respond ONLY with valid JSON, no markdown.\\n\\nAllowed intents:\\n- GET_PLACE_INFO: user asks about a place (info, ticket price, description)\\n- GET_OPENING_HOURS: user asks specifically about opening/closing hours\\n- GET_NEARBY: user asks for nearby places or places around a location\\n- GET_TOUR: user asks about tours (with duration in days)\\n- GET_WEATHER: user asks about weather at a location\\n- GET_DIRECTION: user asks for directions or distance between two places\\n\\nOutput format:\\n{\\n  \\\"intent\\\": \\\"GET_PLACE_INFO\\\",\\n  \\\"entity\\\": \\\"Äá»n ThÃ¡i Vi\\\",\\n  \\\"entity_origin\\\": null,\\n  \\\"entity_destination\\\": null,\\n  \\\"lat\\\": null,\\n  \\\"lng\\\": null,\\n  \\\"duration_days\\\": null,\\n  \\\"need_weather\\\": false\\n}\\n\\nRules:\\n- For GET_DIRECTION: set entity_origin and entity_destination\\n- For GET_TOUR: set duration_days (integer)\\n- For GET_NEARBY: entity = the reference location\\n- For GET_WEATHER: entity = the location\\n- If user asks about ticket price OR general place info â†’ GET_PLACE_INFO\\n- If user asks ONLY about opening hours â†’ GET_OPENING_HOURS\\n- need_weather = true only for GET_WEATHER intent\\n- Always extract the Vietnamese place name as-is, do not translate\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"{{ $json.message }}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "http-intent-parser",
+      "name": "HTTP_IntentParser",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        600
+      ],
+      "credentials": {},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== NormalizeIntent =====\n// LAYER 1: Parse LLM output\n// LAYER 2: Rule-based fallback if LLM timeout/fail (Hybrid)\n// Switch NEVER reads directly from LLM output\n\nlet raw;\ntry {\n  raw = $json.data?.[0]?.message?.content\n        || $json.choices?.[0]?.message?.content\n        || $json.message?.content\n        || $json.content\n        || $json;\n} catch (e) {\n  raw = null;\n}\n\nlet parsed;\ntry {\n  if (typeof raw === 'string') {\n    const cleaned = raw.replace(/```json\\s*/gi, '').replace(/```\\s*/gi, '').trim();\n    parsed = JSON.parse(cleaned);\n  } else {\n    parsed = raw || {};\n  }\n} catch (e) {\n  parsed = {};\n}\n\n// LAYER 2: Rule-based fallback â€” runs only when LLM failed/timed out\nif (!parsed.intent || parsed.intent === 'UNKNOWN') {\n  const msg = (($('Fn_ValidateInput').item?.json?.message) || '').toLowerCase();\n  if (msg.includes('thoi tiet') || msg.includes('thá»i tiáº¿t') || msg.includes('nhiet do') || msg.includes('nhiá»‡t Ä‘á»™')) {\n    parsed.intent = 'GET_WEATHER';\n    parsed.entity = parsed.entity || null;\n  } else if (msg.includes('gio mo cua') || msg.includes('giá» má»Ÿ cá»­a') || msg.includes('mo cua luc') || msg.includes('may gio')) {\n    parsed.intent = 'GET_OPENING_HOURS';\n  } else if (msg.includes('gan day') || msg.includes('gáº§n Ä‘Ã¢y') || msg.includes('xung quanh') || msg.includes('dia diem gan')) {\n    parsed.intent = 'GET_NEARBY';\n  } else if (msg.includes('tour') || msg.includes('du lich') || msg.includes('du lá»‹ch') || msg.includes('ngay')) {\n    parsed.intent = 'GET_TOUR';\n  } else if (msg.includes('duong di') || msg.includes('Ä‘Æ°á»ng Ä‘i') || msg.includes('tu ') && msg.includes(' den ') || msg.includes('tá»« ') && msg.includes(' Ä‘áº¿n ') || msg.includes('chi duong') || msg.includes('chá»‰ Ä‘Æ°á»ng')) {\n    parsed.intent = 'GET_DIRECTION';\n  } else if (msg.length > 2) {\n    parsed.intent = 'GET_PLACE_INFO';\n  }\n}\n\nreturn {\n  intent: parsed.intent || 'UNKNOWN',\n  entity: parsed.entity || null,\n  entity_origin: parsed.entity_origin || null,\n  entity_destination: parsed.entity_destination || null,\n  lat: parsed.lat || null,\n  lng: parsed.lng || null,\n  duration_days: parsed.duration_days || null,\n  need_weather: parsed.need_weather || false\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "normalize-intent",
+      "name": "NormalizeIntent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputIndex": 0,
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "r0",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_PLACE_INFO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputIndex": 1,
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "r1",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_OPENING_HOURS",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputIndex": 2,
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "r2",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_NEARBY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputIndex": 3,
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "r3",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_TOUR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputIndex": 4,
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "r4",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_WEATHER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputIndex": 5,
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "r5",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_DIRECTION",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "switch-intent",
+      "name": "Switch_Intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1300,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== UNKNOWN INTENT HANDLER =====\nconst data = $json;\nreturn {\n  intent: 'UNKNOWN',\n  response_to_user: 'Xin lá»—i, tÃ´i chÆ°a hiá»ƒu yÃªu cáº§u cá»§a báº¡n.\\n\\nTÃ´i cÃ³ thá»ƒ giÃºp báº¡n:\\nðŸ“ ThÃ´ng tin Ä‘á»‹a Ä‘iá»ƒm (giÃ¡ vÃ©, mÃ´ táº£)\\nðŸ•’ Giá» má»Ÿ cá»­a\\nðŸ“ Äá»‹a Ä‘iá»ƒm gáº§n Ä‘Ã¢y\\nðŸ§³ TÃ¬m tour du lá»‹ch\\nðŸŒ¤ï¸ Thá»i tiáº¿t\\nðŸ—ºï¸ Chá»‰ Ä‘Æ°á»ng\\n\\nVÃ­ dá»¥: \"Äá»n ThÃ¡i Vi cÃ³ gÃ¬ hay?\" hoáº·c \"Tour 5 ngÃ y Ninh BÃ¬nh\"',\n  type: 'unknown',\n  _log: { sessionId: data.sessionId, intent: 'UNKNOWN', latencyMs: Date.now() - (data._startTime || Date.now()), source: null, cacheHit: false, fallbackTriggered: false, errorType: null }\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-unknown-handler",
+      "name": "Fn_UnknownIntent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== GET_PLACE_INFO: Normalize Slug =====\n// WHY: Convert Vietnamese entity to URL-safe slug for DB lookup\n\nconst data = $json;\nconst entity = data.entity || '';\n\n// Remove diacritics\nconst slug = entity\n  .normalize('NFD')\n  .replace(/[\\u0300-\\u036f]/g, '')\n  .replace(/Ä‘/g, 'd').replace(/Ä/g, 'D')\n  .toLowerCase()\n  .trim()\n  .replace(/\\s+/g, '-')\n  .replace(/[^a-z0-9-]/g, '');\n\nconsole.log('[PlaceInfo] Entity:', entity, 'â†’ Slug:', slug);\n\nreturn {\n  ...data,\n  slug,\n  entityDisplay: entity\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-place-slug",
+      "name": "Fn_NormalizePlaceSlug",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT name, slug, description, ticket_price, opening_hours, latitude, longitude, place_type FROM places WHERE slug = '{{ $json.slug }}' AND is_active = true LIMIT 1;"
+      },
+      "id": "db-lookup-place",
+      "name": "DB_LookupPlace",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1740,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Travel Bot DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://serpapi.com/search.json?engine=google&q={{ encodeURIComponent($('Fn_NormalizePlaceSlug').first().json.entityDisplay + ' thÃ´ng tin du lá»‹ch giÃ¡ vÃ©') }}&hl=vi&gl=vn&num=3&api_key=a07fa99a7496c03a6a7234328a10231da27f7f0574137244a1da8350c41f1b68",
+        "options": {
+          "timeout": 4000
+        }
+      },
+      "id": "http-serp-place",
+      "name": "HTTP_SERP_PlaceInfo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1740,
+        160
+      ],
+      "credentials": {},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== MERGE PLACE DATA =====\n// RULE: DB overrides ticket_price, opening_hours, coordinates\n// SERP enriches description if DB description is short\n// WHY: DB = authority, SERP = discovery\n// MODE: runOnceForAllItems â€” merges two parallel branches\n\nconst intentData = $('Fn_NormalizePlaceSlug').first()?.json ?? {};\nlet dbRow = null;\nlet serpData = null;\n\ntry {\n  const dbItems = $('DB_LookupPlace').all();\n  if (!Array.isArray(dbItems)) throw new Error('DB_LookupPlace returned non-array');\n  if (dbItems.length > 0 && dbItems[0].json && Object.keys(dbItems[0].json).length > 0) {\n    dbRow = dbItems[0].json;\n  }\n} catch(e) { console.log('[MergePlace] DB read error:', e.message); }\n\ntry {\n  const serpItems = $('HTTP_SERP_PlaceInfo').all();\n  if (!Array.isArray(serpItems)) throw new Error('HTTP_SERP_PlaceInfo returned non-array');\n  if (serpItems.length > 0) {\n    serpData = serpItems[0].json;\n  }\n} catch(e) { console.log('[MergePlace] SERP read error:', e.message); }\n\nconst kg = serpData?.knowledge_graph || {};\nconst organic = serpData?.organic_results || [];\n\n// Extract SERP description\nlet serpDescription = kg.description || '';\nif (!serpDescription && organic.length > 0) {\n  serpDescription = organic[0].snippet || '';\n}\n\n// Extract SERP ticket info from snippets\nlet serpTicket = null;\nlet serpHours = null;\nfor (const r of organic) {\n  const s = (r.snippet || '').toLowerCase();\n  if (!serpTicket) {\n    const pm = s.match(/(\\d+[.,]?\\d*)\\s*(Ä‘|vnÄ‘|Ä‘á»“ng|k|nghÃ¬n|vnd)/i);\n    if (pm) serpTicket = pm[0];\n  }\n  if (!serpHours) {\n    const hm = s.match(/(\\d{1,2}[h:]\\d{0,2}\\s*[-â€“]\\s*\\d{1,2}[h:]\\d{0,2})/i);\n    if (hm) serpHours = hm[0];\n  }\n}\n\n// Merge: DB overrides SERP for authoritative fields\nconst place_info = {\n  name: dbRow?.name || intentData.entityDisplay || kg.title || 'Äá»‹a Ä‘iá»ƒm',\n  description: (dbRow?.description && dbRow.description.length > 50) ? dbRow.description : (serpDescription || dbRow?.description || null),\n  ticket_price: dbRow?.ticket_price || serpTicket || null,\n  opening_hours: dbRow?.opening_hours || serpHours || kg.hours || null,\n  latitude: dbRow?.latitude || null,\n  longitude: dbRow?.longitude || null,\n  address: kg.address || null,\n  place_type: dbRow?.place_type || null\n};\n\nconst source = dbRow ? 'db' : (serpData ? 'serp_external' : 'none');\n\nconsole.log('[MergePlace] Source:', source, '| Name:', place_info.name, '| HasDB:', !!dbRow, '| HasSERP:', !!serpData);\n\nreturn {\n  ...intentData,\n  intent: 'GET_PLACE_INFO',\n  place_info,\n  source,\n  has_results: !!(place_info.description || place_info.ticket_price)\n};",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "fn-merge-place",
+      "name": "Fn_MergePlaceData",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== GET_OPENING_HOURS: Normalize Slug =====\nconst data = $json;\nconst entity = data.entity || '';\nconst slug = entity.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/Ä‘/g, 'd').replace(/Ä/g, 'D').toLowerCase().trim().replace(/\\s+/g, '-').replace(/[^a-z0-9-]/g, '');\nreturn { ...data, slug, entityDisplay: entity };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-hours-slug",
+      "name": "Fn_NormalizeHoursSlug",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT name, opening_hours, ticket_price FROM places WHERE slug = '{{ $json.slug }}' AND is_active = true LIMIT 1;"
+      },
+      "id": "db-lookup-hours",
+      "name": "DB_LookupHours",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1740,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Travel Bot DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT OPENING HOURS =====\n// DB is authoritative. If no DB data, return not-found message.\n// MODE: runOnceForEachItem â€” $json = DB_LookupHours result, .item for upstream\n\nconst intentData = $('Fn_NormalizeHoursSlug').item.json;\n\n// Direct input is DB_LookupHours â€” $json is the row (or {} if empty)\nconst dbRow = ($json && typeof $json === 'object' && $json.name) ? $json : null;\n\nif (dbRow && dbRow.opening_hours) {\n  // Check if currently open\n  const now = new Date();\n  const hours = now.getHours();\n  const minutes = now.getMinutes();\n  const currentMinutes = hours * 60 + minutes;\n  \n  let openStatus = '';\n  const match = (dbRow.opening_hours || '').match(/(\\d{1,2}):(\\d{2})\\s*[-â€“]\\s*(\\d{1,2}):(\\d{2})/);\n  if (match) {\n    const openMin = parseInt(match[1]) * 60 + parseInt(match[2]);\n    const closeMin = parseInt(match[3]) * 60 + parseInt(match[4]);\n    openStatus = (currentMinutes >= openMin && currentMinutes < closeMin) ? 'ðŸŸ¢ Äang má»Ÿ cá»­a' : 'ðŸ”´ ÄÃ£ Ä‘Ã³ng cá»­a';\n  }\n\n  return {\n    ...intentData,\n    intent: 'GET_OPENING_HOURS',\n    place_info: {\n      name: dbRow.name,\n      opening_hours: dbRow.opening_hours,\n      open_status: openStatus\n    },\n    source: 'db',\n    has_results: true\n  };\n}\n\n// No DB data\nreturn {\n  ...intentData,\n  intent: 'GET_OPENING_HOURS',\n  place_info: {\n    name: intentData.entityDisplay,\n    opening_hours: null,\n    open_status: ''\n  },\n  source: 'none',\n  has_results: false\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-format-hours",
+      "name": "Fn_FormatHours",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== GET_NEARBY: Query DB by distance =====\n// Uses Euclidean approximation if PostGIS not available\n// WHY: DB PostGIS is primary for nearby, no external API needed for known places\n\nconst data = $json;\nconst entity = data.entity || '';\n\n// Normalize slug for reference place lookup\nconst slug = entity.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/Ä‘/g, 'd').replace(/Ä/g, 'D').toLowerCase().trim().replace(/\\s+/g, '-').replace(/[^a-z0-9-]/g, '');\n\nreturn { ...data, slug, entityDisplay: entity };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-nearby-slug",
+      "name": "Fn_NearbyPrepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=WITH ref AS (\n  SELECT latitude, longitude, name FROM places WHERE slug = '{{ $json.slug }}' AND is_active = true LIMIT 1\n)\nSELECT p.name, p.slug, p.description, p.ticket_price, p.opening_hours, p.latitude, p.longitude, p.place_type,\n  ROUND(CAST(\n    111.045 * SQRT(POWER(p.latitude - ref.latitude, 2) + POWER((p.longitude - ref.longitude) * COS(RADIANS(ref.latitude)), 2))\n  AS numeric), 2) AS distance_km,\n  ref.name AS ref_name\nFROM places p, ref\nWHERE p.is_active = true AND p.slug != '{{ $json.slug }}'\nORDER BY distance_km ASC\nLIMIT 5;"
+      },
+      "id": "db-nearby",
+      "name": "DB_NearbyPlaces",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1740,
+        500
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Travel Bot DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT NEARBY RESULTS =====\n// MODE: runOnceForAllItems â€” DB_NearbyPlaces returns 0-5 rows (multi-item)\n// .first() and .all() are valid here\n\nconst intentData = $('Fn_NearbyPrepare').first()?.json ?? {};\nlet rows = [];\nlet refName = intentData.entityDisplay || 'Ä‘Ã¢y';\n\ntry {\n  const items = $('DB_NearbyPlaces').all();\n  if (!Array.isArray(items)) throw new Error('DB_NearbyPlaces returned non-array');\n  rows = items.map(i => i.json).filter(r => r && r.name);\n  if (rows.length > 0 && rows[0].ref_name) refName = rows[0].ref_name;\n} catch(e) {\n  console.log('[FormatNearby] Error reading DB:', e.message);\n}\n\nconst top3 = rows.slice(0, 3);\n\nif (top3.length === 0) {\n  return {\n    ...intentData,\n    intent: 'GET_NEARBY',\n    nearby_places: [],\n    ref_name: refName,\n    source: 'none',\n    has_results: false\n  };\n}\n\nconst nearby_places = top3.map((p, i) => ({\n  rank: i + 1,\n  name: p.name,\n  distance_km: p.distance_km,\n  ticket_price: p.ticket_price,\n  opening_hours: p.opening_hours,\n  description: p.description ? p.description.substring(0, 100) + '...' : null,\n  place_type: p.place_type\n}));\n\nreturn {\n  ...intentData,\n  intent: 'GET_NEARBY',\n  nearby_places,\n  ref_name: refName,\n  source: 'db',\n  has_results: true\n};",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "fn-format-nearby",
+      "name": "Fn_FormatNearby",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== GET_TOUR: Prepare tour search =====\nconst data = $json;\nconst duration = data.duration_days || null;\nconst entity = data.entity || 'Ninh BÃ¬nh';\n\n// Normalize slug for DB lookup\nconst slug = entity.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/Ä‘/g, 'd').replace(/Ä/g, 'D').toLowerCase().trim().replace(/\\s+/g, '-').replace(/[^a-z0-9-]/g, '');\n\nreturn { ...data, slug, duration_days: duration, tourLocation: entity };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-tour-prepare",
+      "name": "Fn_TourPrepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT name, duration_days, price, description, highlights FROM tours WHERE is_active = true {{ $json.duration_days ? \"AND duration_days = \" + $json.duration_days : '' }} ORDER BY duration_days ASC LIMIT 5;"
+      },
+      "id": "db-lookup-tour",
+      "name": "DB_LookupTour",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1740,
+        650
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Travel Bot DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://serpapi.com/search.json?engine=google&q={{ encodeURIComponent('tour ' + ($('Fn_TourPrepare').first().json.tourLocation || 'Ninh BÃ¬nh') + ' ' + ($('Fn_TourPrepare').first().json.duration_days ? $('Fn_TourPrepare').first().json.duration_days + ' ngÃ y' : '')) }}&hl=vi&gl=vn&num=5&api_key=a07fa99a7496c03a6a7234328a10231da27f7f0574137244a1da8350c41f1b68",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "http-serp-tour",
+      "name": "HTTP_SERP_Tour",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1740,
+        810
+      ],
+      "credentials": {},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== MERGE TOUR DATA =====\n// DB tours are authoritative. SERP enriches with additional options.\n// MODE: runOnceForAllItems â€” merges two parallel branches\n\nconst intentData = $('Fn_TourPrepare').first()?.json ?? {};\n/** @type {Array<Record<string, any>>} */\nlet dbTours = [];\nlet serpResults = [];\n\ntry {\n  const dbItems = $('DB_LookupTour').all();\n  if (!Array.isArray(dbItems)) throw new Error('DB_LookupTour returned non-array');\n  dbTours = dbItems.map(i => i.json).filter(r => r && r.name);\n} catch(e) { console.log('[MergeTour] DB read error:', e.message); }\n\ntry {\n  const serpItems = $('HTTP_SERP_Tour').all();\n  if (!Array.isArray(serpItems)) throw new Error('HTTP_SERP_Tour returned non-array');\n  const s = serpItems[0]?.json ?? null;\n  serpResults = (s?.organic_results || []).slice(0, 5).map(r => ({\n    title: r.title,\n    snippet: r.snippet || '',\n    link: r.link,\n    source: 'serp'\n  }));\n} catch(e) { console.log('[MergeTour] SERP read error:', e.message); }\n\n// Merge: DB first, then SERP extras\nconst mergedTours = [];\nfor (const t of dbTours) {\n  mergedTours.push({\n    title: t.name,\n    duration_days: t.duration_days,\n    price: t.price,\n    description: t.description,\n    highlights: t.highlights,\n    source: 'db'\n  });\n}\n\n// Add SERP results that don't duplicate DB\nfor (const s of serpResults) {\n  const isDuplicate = mergedTours.some(m => m.title && s.title && m.title.toLowerCase().includes(s.title.toLowerCase().substring(0, 20)));\n  if (!isDuplicate && mergedTours.length < 5) {\n    mergedTours.push({\n      title: s.title,\n      snippet: s.snippet,\n      link: s.link,\n      source: 'serp'\n    });\n  }\n}\n\nconst source = dbTours.length > 0 ? 'db' : (serpResults.length > 0 ? 'serp_external' : 'none');\n\nreturn {\n  ...intentData,\n  intent: 'GET_TOUR',\n  tours: mergedTours,\n  source,\n  has_results: mergedTours.length > 0\n};",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "fn-merge-tour",
+      "name": "Fn_MergeTourData",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        730
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== GET_WEATHER: Resolve coordinates =====\nconst data = $json;\nconst entity = data.entity || '';\nconst slug = entity.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/Ä‘/g, 'd').replace(/Ä/g, 'D').toLowerCase().trim().replace(/\\s+/g, '-').replace(/[^a-z0-9-]/g, '');\nreturn { ...data, slug, weatherLocation: entity };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-weather-prepare",
+      "name": "Fn_WeatherPrepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        950
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT name, latitude, longitude FROM places WHERE slug = '{{ $json.slug }}' AND is_active = true LIMIT 1;"
+      },
+      "id": "db-weather-coords",
+      "name": "DB_GetPlaceCoords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1740,
+        950
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Travel Bot DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== RESOLVE WEATHER COORDINATES =====\n// DB first, HERE Maps fallback if DB miss\n// MODE: runOnceForEachItem â€” $json = DB_GetPlaceCoords result\n\nconst intentData = $('Fn_WeatherPrepare').item.json;\n\n// Direct input is DB_GetPlaceCoords â€” $json is the row\nconst dbRow = ($json && typeof $json === 'object' && $json.latitude) ? $json : null;\n\nif (dbRow) {\n  return {\n    ...intentData,\n    lat: parseFloat(dbRow.latitude),\n    lng: parseFloat(dbRow.longitude),\n    resolvedName: dbRow.name,\n    coordSource: 'db',\n    _needGeocode: false\n  };\n}\n\n// Need geocode fallback\nreturn {\n  ...intentData,\n  lat: null,\n  lng: null,\n  resolvedName: intentData.weatherLocation,\n  coordSource: 'pending',\n  _needGeocode: true\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-resolve-weather-coords",
+      "name": "Fn_ResolveWeatherCoords",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        950
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "need-geocode",
+              "leftValue": "={{ $json._needGeocode === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-need-geocode",
+      "name": "IF_NeedGeocode",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2180,
+        950
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://geocode.search.hereapi.com/v1/geocode?q={{ encodeURIComponent($json.weatherLocation || $json.entity) }}&limit=1&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "http-geocode-fallback",
+      "name": "HTTP_GeocodeFallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        1050
+      ],
+      "credentials": {},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE GEOCODE RESULT =====\nconst intentData = $('Fn_ResolveWeatherCoords').item.json;\nconst items = $json.items || [];\n\nif (items.length > 0 && items[0].position) {\n  return {\n    ...intentData,\n    lat: items[0].position.lat,\n    lng: items[0].position.lng,\n    resolvedName: items[0].title || intentData.weatherLocation,\n    coordSource: 'geocode',\n    _needGeocode: false\n  };\n}\n\n// Geocode failed â€” try using entity name directly with WeatherAPI (it supports city names)\nreturn {\n  ...intentData,\n  lat: null,\n  lng: null,\n  coordSource: 'name_fallback',\n  _needGeocode: false\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-parse-geocode",
+      "name": "Fn_ParseGeocode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        1050
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.weatherapi.com/v1/current.json?q={{ $json.lat && $json.lng ? $json.lat + ',' + $json.lng : encodeURIComponent($json.weatherLocation || $json.entity) }}&aqi=yes&lang=vi&key=52c2f536877444ec8a0165526260501",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "http-get-weather",
+      "name": "HTTP_GetWeather",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2840,
+        950
+      ],
+      "credentials": {},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT WEATHER RESULT =====\nconst intentData = $('Fn_WeatherPrepare').item.json;\nconst w = $json;\n\nif (!w || !w.current) {\n  return {\n    ...intentData,\n    intent: 'GET_WEATHER',\n    weather: null,\n    source: 'none',\n    has_results: false\n  };\n}\n\nconst current = w.current;\nconst location = w.location || {};\n\n// AQI label\nlet aqiLabel = '';\nconst pm25 = current.air_quality?.pm2_5;\nif (pm25 != null) {\n  if (pm25 <= 12) aqiLabel = 'Tá»‘t';\n  else if (pm25 <= 35) aqiLabel = 'Trung bÃ¬nh';\n  else if (pm25 <= 55) aqiLabel = 'KÃ©m';\n  else aqiLabel = 'Xáº¥u';\n}\n\nconst weather = {\n  temp_c: current.temp_c,\n  feelslike_c: current.feelslike_c,\n  condition: current.condition?.text || '',\n  condition_icon: current.condition?.icon || '',\n  humidity: current.humidity,\n  wind_kph: current.wind_kph,\n  wind_dir: current.wind_dir,\n  precip_mm: current.precip_mm,\n  uv: current.uv,\n  air_quality: pm25 != null ? { pm2_5: Math.round(pm25 * 10) / 10, label: aqiLabel } : null,\n  localtime: location.localtime || ''\n};\n\nreturn {\n  ...intentData,\n  intent: 'GET_WEATHER',\n  weather,\n  location_name: location.name || intentData.weatherLocation,\n  source: 'weatherapi',\n  has_results: true\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-format-weather",
+      "name": "Fn_FormatWeather",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3060,
+        950
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== GET_DIRECTION: Extract origin + destination =====\nconst data = $json;\n\nfunction toSlug(text) {\n  return (text || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/Ä‘/g, 'd').replace(/Ä/g, 'D').toLowerCase().trim().replace(/\\s+/g, '-').replace(/[^a-z0-9-]/g, '');\n}\n\nconst origin = data.entity_origin || '';\nconst destination = data.entity_destination || '';\n\nreturn {\n  ...data,\n  origin_display: origin,\n  destination_display: destination,\n  origin_slug: toSlug(origin),\n  destination_slug: toSlug(destination)\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-direction-extract",
+      "name": "Fn_ExtractDirectionEntities",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT slug, name, latitude, longitude FROM places WHERE slug IN ('{{ $json.origin_slug }}', '{{ $json.destination_slug }}') AND is_active = true;"
+      },
+      "id": "db-direction-coords",
+      "name": "DB_DirectionCoords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1740,
+        1200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Travel Bot DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== RESOLVE DIRECTION COORDINATES =====\n// DB lookup for both origin + destination, geocode fallback for unknowns\n// MODE: runOnceForAllItems â€” DB may return 0-2 rows (both slugs)\n\nconst intentData = $('Fn_ExtractDirectionEntities').first()?.json ?? {};\nlet dbRows = [];\n\ntry {\n  const items = $('DB_DirectionCoords').all();\n  if (!Array.isArray(items)) throw new Error('DB_DirectionCoords returned non-array');\n  dbRows = items.map(i => i.json).filter(r => r && r.slug);\n} catch(e) {\n  console.log('[ResolveDirection] DB read error:', e.message);\n}\n\nconst originRow = dbRows.find(r => r.slug === intentData.origin_slug) || null;\nconst destRow = dbRows.find(r => r.slug === intentData.destination_slug) || null;\n\nreturn {\n  ...intentData,\n  origin: {\n    name: originRow?.name || intentData.origin_display,\n    lat: originRow ? parseFloat(originRow.latitude) : null,\n    lng: originRow ? parseFloat(originRow.longitude) : null,\n    resolved: !!originRow\n  },\n  destination: {\n    name: destRow?.name || intentData.destination_display,\n    lat: destRow ? parseFloat(destRow.latitude) : null,\n    lng: destRow ? parseFloat(destRow.longitude) : null,\n    resolved: !!destRow\n  },\n  _allResolved: !!(originRow && destRow),\n  _needOriginGeocode: !originRow,\n  _needDestGeocode: !destRow\n};",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "fn-resolve-direction",
+      "name": "Fn_ResolveDirectionCoords",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "all-resolved",
+              "leftValue": "={{ $json._allResolved === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-direction-resolved",
+      "name": "IF_DirectionCoordsResolved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2180,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://geocode.search.hereapi.com/v1/geocode?q={{ encodeURIComponent(($json._needOriginGeocode ? $json.origin.name : $json.destination.name) + ' Vietnam') }}&limit=1&apiKey=KEdGMWp6Tp_mpBomQv2hmZxHoVJhzoO8jTHaweW7wV0",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "http-geocode-direction",
+      "name": "HTTP_GeocodeDirection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        1350
+      ],
+      "credentials": {},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE DIRECTION GEOCODE =====\nconst intentData = $('Fn_ResolveDirectionCoords').item.json;\nconst items = $json.items || [];\nconst geo = items[0]?.position || null;\n\nlet origin = { ...intentData.origin };\nlet destination = { ...intentData.destination };\n\nif (intentData._needOriginGeocode && geo) {\n  origin.lat = geo.lat;\n  origin.lng = geo.lng;\n  origin.resolved = true;\n} else if (intentData._needDestGeocode && geo) {\n  destination.lat = geo.lat;\n  destination.lng = geo.lng;\n  destination.resolved = true;\n}\n\n// If second location also needs geocoding, we use Haversine fallback\nconst allResolved = origin.resolved && destination.resolved;\n\nreturn {\n  ...intentData,\n  origin,\n  destination,\n  _allResolved: allResolved\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-parse-direction-geocode",
+      "name": "Fn_ParseDirectionGeocode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        1350
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openrouteservice.org/v2/matrix/driving-car",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"locations\": [\n    [{{ $json.origin.lng }}, {{ $json.origin.lat }}],\n    [{{ $json.destination.lng }}, {{ $json.destination.lat }}]\n  ],\n  \"metrics\": [\"distance\", \"duration\"]\n}",
+        "options": {
+          "timeout": 4000
+        }
+      },
+      "id": "http-ors-direction",
+      "name": "HTTP_ORS_Direction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2840,
+        1200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_ORS_CREDENTIAL_ID",
+          "name": "OpenRouteService"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT DIRECTION RESULT =====\nlet intentData;\ntry {\n  intentData = $('Fn_ResolveDirectionCoords').item.json;\n} catch(e) {\n  try { intentData = $('Fn_ParseDirectionGeocode').item.json; } catch(e2) { intentData = {}; }\n}\n\nconst ors = $json;\nlet distance_km = null;\nlet duration_min = null;\nlet source = 'none';\n\ntry {\n  if (ors.distances && ors.distances[0] && ors.distances[0][1] != null) {\n    distance_km = Math.round(ors.distances[0][1] / 10) / 100; // meters to km\n    duration_min = Math.round(ors.durations[0][1] / 60);\n    source = 'ors';\n  }\n} catch(e) {}\n\n// Haversine fallback\nif (!distance_km && intentData.origin.lat && intentData.destination.lat) {\n  const R = 6371;\n  const dLat = (intentData.destination.lat - intentData.origin.lat) * Math.PI / 180;\n  const dLng = (intentData.destination.lng - intentData.origin.lng) * Math.PI / 180;\n  const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(intentData.origin.lat * Math.PI / 180) * Math.cos(intentData.destination.lat * Math.PI / 180) * Math.sin(dLng/2) * Math.sin(dLng/2);\n  distance_km = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 100) / 100;\n  source = 'haversine';\n}\n\nconst direction_info = {\n  origin: intentData.origin,\n  destination: intentData.destination,\n  distance_km,\n  duration_min,\n  source,\n  maps_link: intentData.origin.lat && intentData.destination.lat ? \n    `https://www.google.com/maps/dir/${intentData.origin.lat},${intentData.origin.lng}/${intentData.destination.lat},${intentData.destination.lng}` : null\n};\n\nreturn {\n  ...intentData,\n  intent: 'GET_DIRECTION',\n  direction_info,\n  source,\n  has_results: !!distance_km\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fn-format-direction",
+      "name": "Fn_FormatDirection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3060,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"google/gemini-2.0-flash-001\",\n  \"temperature\": 0.3,\n  \"max_tokens\": 500,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a response formatter for a Vietnamese travel assistant bot. Format the structured data below into a natural, friendly Vietnamese response.\\n\\nRULES:\\n- Use emoji for visual clarity (ðŸ“ðŸŽ«ðŸ•’ðŸŒ¤ï¸ðŸ§³ðŸ—ºï¸)\\n- Use bullet format, clear and concise\\n- DO NOT invent facts\\n- DO NOT modify ticket prices or opening hours\\n- DO NOT add information not present in the data\\n- If data is missing, say so honestly\\n- Keep response under 300 words\\n- End with a helpful follow-up question\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"{{ JSON.stringify({ intent: $json.intent, data: $json }) }}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "http-response-composer",
+      "name": "HTTP_ResponseComposer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3400,
+        600
+      ],
+      "credentials": {},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== BUILD FINAL RESPONSE =====\n// Merges LLM-formatted text with structured metadata\n// MODE: runOnceForAllItems â€” cross-branch reads require .first()/.all()\n\n// === SAFE cross-branch reader ===\nfunction safeFirst(nodeName) {\n  try { return $( nodeName ).first()?.json ?? null; } catch(e) { return null; }\n}\n\nconst intentData = safeFirst('HTTP_ResponseComposer');\n\n// Get source data from whichever pipeline fed into composer\nconst candidates = [\n  'Fn_MergePlaceData', 'Fn_FormatHours', 'Fn_FormatNearby',\n  'Fn_MergeTourData', 'Fn_FormatWeather', 'Fn_FormatDirection',\n  'Fn_UnknownIntent'\n];\nlet sourceData = null;\nfor (const name of candidates) {\n  const d = safeFirst(name);\n  if (d && d.intent) { sourceData = d; break; }\n}\nsourceData = sourceData || {};\n\n// Extract LLM response\nlet formattedResponse = '';\ntry {\n  formattedResponse = intentData?.choices?.[0]?.message?.content || '';\n} catch(e) {}\n\n// If source already has a response (e.g. Fn_UnknownIntent), use it\nif (!formattedResponse && sourceData.response_to_user) {\n  formattedResponse = sourceData.response_to_user;\n}\n\n// Fallback: if LLM failed AND no pre-built response, build basic response\nif (!formattedResponse) {\n  formattedResponse = buildFallbackResponse(sourceData);\n}\n\nconst _st = sourceData._startTime || Date.now();\n\nreturn {\n  intent: sourceData.intent || 'UNKNOWN',\n  source: sourceData.source || 'none',\n  response_to_user: formattedResponse,\n  type: sourceData.has_results ? 'success' : 'no_results',\n  _log: {\n    sessionId: sourceData.sessionId || 'unknown',\n    intent: sourceData.intent || 'UNKNOWN',\n    entity: sourceData.entity || sourceData.entityDisplay || null,\n    source: sourceData.source || null,\n    latencyMs: Date.now() - _st,\n    cacheHit: false,\n    fallbackTriggered: !formattedResponse,\n    errorType: null\n  }\n};\n\nfunction buildFallbackResponse(data) {\n  if (!data || typeof data !== 'object') return 'KhÃ´ng cÃ³ dá»¯ liá»‡u.';\n  const intent = data.intent || '';\n  switch(intent) {\n    case 'GET_PLACE_INFO': {\n      const p = data.place_info || {};\n      const parts = ['ðŸ“ ' + (p.name || 'Äá»‹a Ä‘iá»ƒm')];\n      if (p.ticket_price) parts.push('ðŸŽ« GiÃ¡ vÃ©: ' + p.ticket_price);\n      if (p.opening_hours) parts.push('ðŸ•’ Giá» má»Ÿ cá»­a: ' + p.opening_hours);\n      if (p.description) parts.push('\\n' + p.description);\n      return parts.join('\\n');\n    }\n    case 'GET_OPENING_HOURS': {\n      const p = data.place_info || {};\n      if (!p.opening_hours) return 'KhÃ´ng tÃ¬m tháº¥y giá» má»Ÿ cá»­a cho ' + (p.name || 'Ä‘á»‹a Ä‘iá»ƒm nÃ y') + '.';\n      return 'ðŸ•’ ' + p.name + '\\nGiá» má»Ÿ cá»­a: ' + p.opening_hours + (p.open_status ? '\\n' + p.open_status : '');\n    }\n    case 'GET_NEARBY': {\n      const places = data.nearby_places || [];\n      if (places.length === 0) return 'KhÃ´ng tÃ¬m tháº¥y Ä‘á»‹a Ä‘iá»ƒm gáº§n ' + (data.ref_name || 'Ä‘Ã¢y') + '.';\n      const parts = ['ðŸ“ Äá»‹a Ä‘iá»ƒm gáº§n ' + (data.ref_name || 'Ä‘Ã¢y') + ':'];\n      for (const p of places) {\n        parts.push(p.rank + '. ' + p.name + (p.distance_km ? ' (' + p.distance_km + ' km)' : ''));\n      }\n      return parts.join('\\n');\n    }\n    case 'GET_TOUR': {\n      const tours = data.tours || [];\n      if (tours.length === 0) return 'KhÃ´ng tÃ¬m tháº¥y tour phÃ¹ há»£p.';\n      const parts = ['ðŸ§³ Tour du lá»‹ch:'];\n      for (let i = 0; i < tours.length; i++) {\n        const t = tours[i];\n        parts.push((i+1) + '. ' + t.title + (t.price ? ' - ' + t.price : ''));\n      }\n      return parts.join('\\n');\n    }\n    case 'GET_WEATHER': {\n      const w = data.weather;\n      if (!w) return 'KhÃ´ng láº¥y Ä‘Æ°á»£c dá»¯ liá»‡u thá»i tiáº¿t.';\n      return 'ðŸŒ¤ï¸ Thá»i tiáº¿t ' + (data.location_name || '') + '\\nðŸŒ¡ï¸ ' + w.temp_c + 'Â°C - ' + w.condition + '\\nðŸ’§ Äá»™ áº©m: ' + w.humidity + '%';\n    }\n    case 'GET_DIRECTION': {\n      const d = data.direction_info;\n      if (!d || !d.distance_km) return 'KhÃ´ng tÃ­nh Ä‘Æ°á»£c khoáº£ng cÃ¡ch.';\n      let text = 'ðŸ—ºï¸ ' + d.origin.name + ' â†’ ' + d.destination.name + '\\nðŸ“ ' + d.distance_km + ' km';\n      if (d.duration_min) text += '\\nâ±ï¸ ~' + Math.floor(d.duration_min / 60) + 'h' + (d.duration_min % 60) + 'm';\n      if (d.maps_link) text += '\\nðŸ”— ' + d.maps_link;\n      return text;\n    }\n    default:\n      return 'KhÃ´ng cÃ³ dá»¯ liá»‡u.';\n  }\n}",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "fn-build-final",
+      "name": "Fn_BuildFinalResponse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3620,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ intent: $json.intent, source: $json.source, response_to_user: $json.response_to_user, type: $json.type }) }}",
+        "options": {}
+      },
+      "id": "respond-final",
+      "name": "Respond_Final",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3840,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO request_log (session_id, intent, entity, source, latency_ms, cache_hit, fallback_triggered, error_type) VALUES ('{{ $json._log ? $json._log.sessionId : 'unknown' }}', '{{ $json._log ? $json._log.intent : 'UNKNOWN' }}', '{{ $json._log ? ($json._log.entity || '') : '' }}', '{{ $json._log ? ($json._log.source || '') : '' }}', {{ $json._log ? ($json._log.latencyMs || 0) : 0 }}, {{ $json._log ? $json._log.cacheHit : false }}, {{ $json._log ? $json._log.fallbackTriggered : false }}, {{ $json._log && $json._log.errorType ? \"'\" + $json._log.errorType + \"'\" : 'NULL' }});"
+      },
+      "id": "db-write-log",
+      "name": "DB_WriteLog",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3840,
+        800
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "postgres": {
+          "id": "wanVbO3iF1oBHLKq",
+          "name": "Travel Bot DB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook_Receive": {
+      "main": [
+        [
+          {
+            "node": "Fn_ValidateInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ValidateInput": {
+      "main": [
+        [
+          {
+            "node": "IF_InputValid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_InputValid": {
+      "main": [
+        [
+          {
+            "node": "HTTP_IntentParser",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond_InvalidInput",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_IntentParser": {
+      "main": [
+        [
+          {
+            "node": "NormalizeIntent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NormalizeIntent": {
+      "main": [
+        [
+          {
+            "node": "Switch_Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_Intent": {
+      "main": [
+        [
+          {
+            "node": "Fn_NormalizePlaceSlug",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_NormalizeHoursSlug",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_NearbyPrepare",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_TourPrepare",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_WeatherPrepare",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_ExtractDirectionEntities",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_UnknownIntent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NormalizePlaceSlug": {
+      "main": [
+        [
+          {
+            "node": "DB_LookupPlace",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP_SERP_PlaceInfo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupPlace": {
+      "main": [
+        [
+          {
+            "node": "Fn_MergePlaceData",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SERP_PlaceInfo": {
+      "main": [
+        [
+          {
+            "node": "Fn_MergePlaceData",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_MergePlaceData": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NormalizeHoursSlug": {
+      "main": [
+        [
+          {
+            "node": "DB_LookupHours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupHours": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatHours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatHours": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NearbyPrepare": {
+      "main": [
+        [
+          {
+            "node": "DB_NearbyPlaces",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_NearbyPlaces": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatNearby",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatNearby": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_TourPrepare": {
+      "main": [
+        [
+          {
+            "node": "DB_LookupTour",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP_SERP_Tour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_LookupTour": {
+      "main": [
+        [
+          {
+            "node": "Fn_MergeTourData",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SERP_Tour": {
+      "main": [
+        [
+          {
+            "node": "Fn_MergeTourData",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_MergeTourData": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_WeatherPrepare": {
+      "main": [
+        [
+          {
+            "node": "DB_GetPlaceCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_GetPlaceCoords": {
+      "main": [
+        [
+          {
+            "node": "Fn_ResolveWeatherCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ResolveWeatherCoords": {
+      "main": [
+        [
+          {
+            "node": "IF_NeedGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NeedGeocode": {
+      "main": [
+        [
+          {
+            "node": "HTTP_GeocodeFallback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_GetWeather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GeocodeFallback": {
+      "main": [
+        [
+          {
+            "node": "Fn_ParseGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseGeocode": {
+      "main": [
+        [
+          {
+            "node": "HTTP_GetWeather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GetWeather": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatWeather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatWeather": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ExtractDirectionEntities": {
+      "main": [
+        [
+          {
+            "node": "DB_DirectionCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_DirectionCoords": {
+      "main": [
+        [
+          {
+            "node": "Fn_ResolveDirectionCoords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ResolveDirectionCoords": {
+      "main": [
+        [
+          {
+            "node": "IF_DirectionCoordsResolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_DirectionCoordsResolved": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ORS_Direction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_GeocodeDirection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GeocodeDirection": {
+      "main": [
+        [
+          {
+            "node": "Fn_ParseDirectionGeocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseDirectionGeocode": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ORS_Direction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_ORS_Direction": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatDirection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatDirection": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ResponseComposer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_UnknownIntent": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_ResponseComposer": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildFinalResponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_BuildFinalResponse": {
+      "main": [
+        [
+          {
+            "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DB_WriteLog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v2",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "executionTimeout": 120
+  },
+  "meta": {
+    "instanceId": "production-travel-bot-v1"
+  }
+}

@@ -1,4 +1,5 @@
 {
+  "name": "Disciplined Travel Assistant (Production)",
   "nodes": [
     {
       "parameters": {
@@ -21,7 +22,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ===== NORMALIZE INPUT =====\n// Mission: Clean ONLY, không sửa nghĩa\n// ⚡ FIX: Xử lý mọi cách n8n trả data từ webhook\n\n// n8n webhook trả data trong $json.body\nconst body = $json.body || {};\nconst query = $json.query || {};\nconst headers = $json.headers || {};\n\n// Get or generate sessionId\nlet sessionId = body.sessionId || query.sessionId || headers['x-session-id'];\nif (!sessionId) {\n  const timestamp = Date.now();\n  const random = Math.random().toString(36).substring(2, 15);\n  sessionId = `sess_${timestamp}_${random}`;\n}\n\n// Extract message từ body\nconst message = String(body.message || '').trim();\nconst messageLower = message.toLowerCase();\n\n// Nhận user_location từ client (cho Nearby)\nconst userLocation = body.user_location || null;\n\nreturn {\n  sessionId,\n  message,\n  messageLower,\n  userLocation\n};"
+        "jsCode": "// ===== NORMALIZE INPUT =====\n// Mission: Clean ONLY, không sửa nghĩa\n\nconst body = $json.body || {};\nconst query = $json.query || {};\nconst headers = $json.headers || {};\n\nlet sessionId = body.sessionId || query.sessionId || headers['x-session-id'];\nif (!sessionId) {\n  sessionId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;\n}\n\nconst message = String(body.message || '').trim();\nconst messageLower = message.toLowerCase();\nconst userLocation = body.user_location || null;\n\nreturn { sessionId, message, messageLower, userLocation, _startTime: Date.now() };"
       },
       "id": "d1dd8dc6-c5a1-4739-a831-e70ae7bfa4ae",
       "name": "Fn_NormalizeInput",
@@ -34,29 +35,11 @@
     },
     {
       "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": false,
-            "leftValue": "",
-            "typeValidation": "loose"
-          },
-          "conditions": [
-            {
-              "leftValue": "={{ $json.messageLower }}",
-              "rightValue": "du lịch|địa điểm|tham quan|đi chơi|đi đâu|thời tiết|khách sạn|hotel|weather|attraction|tour|gần tôi|quanh tôi|giá vé|giờ mở cửa|thông tin|hành trình|ngày",
-              "operator": {
-                "type": "string",
-                "operation": "regex"
-              }
-            }
-          ],
-          "combinator": "or"
-        },
-        "options": {}
+        "jsCode": "// ===== INTENT SCORING ENGINE =====\n// Deterministic scoring with threshold + tie-breaking\n// NO AI, NO ML, pure weighted keyword scoring\n\nconst msg = $json.messageLower;\nconst prevData = $json;\n\nconst scores = {\n  SEARCH_NEARBY: 0,\n  GET_PLACE_INFO: 0,\n  SEARCH_TOUR: 0,\n  GET_WEATHER: 0,\n  SEARCH_HOTEL: 0,\n  SEARCH_POI: 0,\n  GET_DISTANCE: 0\n};\n\nconst INTENT_PRIORITY = {\n  GET_DISTANCE: 7,\n  GET_PLACE_INFO: 6,\n  SEARCH_NEARBY: 5,\n  SEARCH_TOUR: 4,\n  GET_WEATHER: 3,\n  SEARCH_HOTEL: 2,\n  SEARCH_POI: 1\n};\n\n// GET_DISTANCE\nif (/khoảng cách|bao xa|how far/.test(msg)) scores.GET_DISTANCE += 5;\nif (/từ\\s.+\\sđến\\s/.test(msg)) scores.GET_DISTANCE += 5;\nif (/đường đi|route|directions/.test(msg)) scores.GET_DISTANCE += 4;\nif (/mất bao lâu|bao lâu/.test(msg)) scores.GET_DISTANCE += 3;\nif (/cách.*bao/.test(msg)) scores.GET_DISTANCE += 3;\n\n// SEARCH_NEARBY\nif (/gần tôi|quanh tôi|xung quanh tôi|near me|nearby/.test(msg)) scores.SEARCH_NEARBY += 5;\nif (/gần đây/.test(msg)) scores.SEARCH_NEARBY += 3;\n\n// GET_PLACE_INFO\nif (/giá vé|vé vào|phí tham quan/.test(msg)) scores.GET_PLACE_INFO += 5;\nif (/giờ mở cửa|mở cửa lúc/.test(msg)) scores.GET_PLACE_INFO += 5;\nif (/thông tin/.test(msg)) scores.GET_PLACE_INFO += 3;\nif (/miễn phí|mất phí/.test(msg)) scores.GET_PLACE_INFO += 3;\n\n// SEARCH_TOUR\nif (/tour\\s/.test(msg)) scores.SEARCH_TOUR += 5;\nif (/\\d+\\s*ngày/.test(msg)) scores.SEARCH_TOUR += 4;\nif (/hành trình|lịch trình|chuyến đi/.test(msg)) scores.SEARCH_TOUR += 3;\n\n// GET_WEATHER\nif (/thời tiết|weather/.test(msg)) scores.GET_WEATHER += 5;\nif (/nhiệt độ|độ c/.test(msg)) scores.GET_WEATHER += 3;\nif (/mưa|nắng/.test(msg)) scores.GET_WEATHER += 2;\n\n// SEARCH_HOTEL\nif (/khách sạn|hotel/.test(msg)) scores.SEARCH_HOTEL += 5;\nif (/phòng nghỉ|homestay|resort|nhà nghỉ/.test(msg)) scores.SEARCH_HOTEL += 4;\n\n// SEARCH_POI\nif (/địa điểm|tham quan/.test(msg)) scores.SEARCH_POI += 4;\nif (/du lịch|đi chơi|đi đâu/.test(msg)) scores.SEARCH_POI += 3;\nif (/attraction/.test(msg)) scores.SEARCH_POI += 3;\n\nconst THRESHOLD = 3;\nconst sorted = Object.entries(scores)\n  .sort((a, b) => b[1] - a[1] || INTENT_PRIORITY[b[0]] - INTENT_PRIORITY[a[0]]);\nconst top = sorted[0];\nconst second = sorted[1];\n\nlet intent = 'UNKNOWN';\nlet confidence = 'low';\nlet hasOverlap = false;\n\nif (top[1] >= THRESHOLD) {\n  intent = top[0];\n  const gap = top[1] - second[1];\n  if (gap >= 3) confidence = 'high';\n  else if (gap >= 1) confidence = 'medium';\n  else { confidence = 'low'; hasOverlap = true; }\n}\n\nconsole.log('[IntentScoring] Winner:', intent, '| Score:', top[1], '| Gap:', top[1] - second[1], '| Overlap:', hasOverlap);\n\nreturn {\n  ...prevData,\n  intent,\n  confidence,\n  intentScores: scores,\n  hasOverlap\n};"
       },
-      "id": "6dd02752-a823-4850-b3b9-27d87d26a203",
-      "name": "IF_IsTravelDomain",
-      "type": "n8n-nodes-base.if",
+      "id": "af8b5ae1-rule-based-intent",
+      "name": "Fn_DetectIntentRuleBased",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
         57248,
@@ -65,54 +48,26 @@
     },
     {
       "parameters": {
-        "jsCode": "return {\n  response: 'Hiện tại tôi hỗ trợ:\\n\\n📍 Thông tin địa điểm (giá vé, giờ mở cửa)\\n🏞️ Tìm địa điểm du lịch\\n🏚️ Tìm khách sạn\\n🧳 Tìm tour trọn gói\\n🌦️ Xem thời tiết\\n📍 Tìm gần tôi\\n\\nVí dụ: \"Thông tin đền Thái Vi\" hoặc \"3 điểm du lịch gần tôi\"',\n  type: 'out_of_scope'\n};"
-      },
-      "id": "dfaba99e-ddd3-40f9-80cd-2360487bdcc5",
-      "name": "Respond_OutOfScope",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        61600,
-        69200
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== RULE-BASED INTENT DETECTION =====\n// Mission: Phân loại intent bằng keyword, KHÔNG AI\n// ⚡ THÊM: GET_PLACE_INFO, SEARCH_NEARBY, SEARCH_TOUR\n\nconst msg = $json.messageLower;\nconst prevData = $json;\n\nlet intent = 'UNKNOWN';\nlet confidence = 'low';\n\n// ===== PRIORITY ORDER (quan trọng!) =====\n\n// 1️⃣ SEARCH_NEARBY - Ưu tiên cao nhất\nif (\n  msg.includes('gần tôi') ||\n  msg.includes('quanh tôi') ||\n  msg.includes('xung quanh tôi') ||\n  msg.includes('gần đây') ||\n  msg.includes('near me') ||\n  msg.includes('nearby')\n) {\n  intent = 'SEARCH_NEARBY';\n  confidence = 'high';\n}\n\n// 2️⃣ GET_PLACE_INFO - Thông tin chi tiết\nelse if (\n  msg.includes('giá vé') ||\n  msg.includes('giờ mở cửa') ||\n  msg.includes('thông tin') ||\n  msg.includes('mở cửa lúc') ||\n  msg.includes('vé vào') ||\n  msg.includes('phí tham quan') ||\n  msg.includes('miễn phí') ||\n  msg.includes('mất phí')\n) {\n  intent = 'GET_PLACE_INFO';\n  confidence = 'high';\n}\n\n// 3️⃣ SEARCH_TOUR - Tour du lịch\nelse if (\n  msg.includes('tour ') ||\n  msg.match(/\\d+\\s*ngày/) ||  // \"5 ngày\", \"3ngày\"\n  msg.includes('hành trình') ||\n  msg.includes('lịch trình') ||\n  msg.includes('chuyến đi')\n) {\n  intent = 'SEARCH_TOUR';\n  confidence = 'high';\n}\n\n// 4️⃣ GET_WEATHER - Thời tiết\nelse if (\n  msg.includes('thời tiết') ||\n  msg.includes('weather') ||\n  msg.includes('mưa') ||\n  msg.includes('nắng') ||\n  msg.includes('nhiệt độ') ||\n  msg.includes('độ c')\n) {\n  intent = 'GET_WEATHER';\n  confidence = 'high';\n}\n\n// 5️⃣ SEARCH_HOTEL - Khách sạn\nelse if (\n  msg.includes('khách sạn') ||\n  msg.includes('hotel') ||\n  msg.includes('phòng nghỉ') ||\n  msg.includes('homestay') ||\n  msg.includes('resort') ||\n  msg.includes('nhà nghỉ')\n) {\n  intent = 'SEARCH_HOTEL';\n  confidence = 'high';\n}\n\n// 6️⃣ SEARCH_POI - Địa điểm du lịch (default cho travel domain)\nelse if (\n  msg.includes('địa điểm') ||\n  msg.includes('tham quan') ||\n  msg.includes('du lịch') ||\n  msg.includes('đi chơi') ||\n  msg.includes('đi đâu') ||\n  msg.includes('attraction')\n) {\n  intent = 'SEARCH_POI';\n  confidence = 'high';\n}\n\nreturn {\n  sessionId: prevData.sessionId,\n  message: prevData.message,\n  messageLower: prevData.messageLower,\n  userLocation: prevData.userLocation,\n  intent,\n  confidence\n};"
-      },
-      "id": "af8b5ae1-rule-based-intent",
-      "name": "Fn_DetectIntentRuleBased",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        57472,
-        68304
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== CHECK REQUIRED SLOTS (STRICT, NO GUESS) =====\n// Mission: Check dữ liệu có sẵn - KHÔNG tạo default\n// ⚡ AGODA-STYLE: Location = placeName HOẶC userLocation (chưa cần lat/lng)\n\nconst data = $json;\nconst message = data.messageLower || '';\nconst intent = data.intent || 'UNKNOWN';\n\n// ✅ LUÔN ĐỌC TỪ $json\nconst userLocation = data.userLocation || null;\n\n// ---- CHECK PLACE NAME (explicit text) ----\nconst hasPlaceName =\n  message.includes('đền') ||\n  message.includes('chùa') ||\n  message.includes('nhà thờ') ||\n  message.includes('bảo tàng') ||\n  message.includes('lăng') ||\n  message.includes('hồ ') ||\n  message.includes('núi ') ||\n  message.includes('biển');\n\n// ---- CHECK LOCATION HINT (city/area names) ----\nconst hasLocationHint =\n  message.includes('ở ') ||\n  message.includes('tại ') ||\n  message.includes('gần ') ||\n  message.includes('quanh ') ||\n  message.includes('xung quanh ') ||\n  message.includes('khu vực ') ||\n  message.includes('hà nội') ||\n  message.includes('sài gòn') ||\n  message.includes('đà nẵng') ||\n  message.includes('ninh bình');\n\n// ---- CHECK \"GẦN TÔI\" ----\nconst isNearMe =\n  message.includes('gần tôi') ||\n  message.includes('quanh tôi') ||\n  message.includes('xung quanh tôi') ||\n  message.includes('gần đây');\n\n// ---- CHECK USER LOCATION AVAILABLE ----\nconst hasUserLocation = !!(userLocation && userLocation.lat && userLocation.lng);\n\n// ---- CHECK TIME ----\nconst hasTimeHint =\n  message.includes('hôm nay') ||\n  message.includes('cuối tuần') ||\n  message.includes('ngày mai') ||\n  message.includes('tuần này');\n\n// ---- CHECK TOUR DURATION ----\nconst durationMatch = message.match(/(\\d+)\\s*ngày/);\nconst tourDuration = durationMatch ? parseInt(durationMatch[1]) : null;\n\n// ---- SLOT VALIDATION - AGODA LOGIC ----\nlet missingSlots = [];\nlet needClarification = false;\n\n// 🔥 SEARCH_POI / SEARCH_NEARBY - Chấp nhận place name HOẶC userLocation HOẶC isNearMe\nif (intent === 'SEARCH_POI' || intent === 'SEARCH_NEARBY') {\n  // ✅ Có ít nhất 1 trong 4 nguồn location là HỢP LỆ:\n  // 1. Place name (\"Hồ Gươm\", \"Đền Thái Vi\")\n  // 2. Location hint (\"gần Hà Nội\", \"ở Đà Nẵng\")\n  // 3. User location (lat/lng từ device)\n  // 4. \"Gần tôi\" (sẽ xin quyền sau)\n  const hasAnyLocationSource = hasPlaceName || hasLocationHint || hasUserLocation || isNearMe;\n  \n  if (!hasAnyLocationSource) {\n    missingSlots.push('location');\n    needClarification = true;\n  } else {\n    // ✅ Có nguồn location → workflow tiếp tục\n    needClarification = false;\n  }\n}\n// GET_PLACE_INFO - Chỉ cần place name\nelse if (intent === 'GET_PLACE_INFO') {\n  if (!hasPlaceName) {\n    missingSlots.push('placeName');\n    needClarification = true;\n  }\n}\n// GET_WEATHER - Cần location hint\nelse if (intent === 'GET_WEATHER') {\n  if (!hasLocationHint && !hasPlaceName) {\n    missingSlots.push('location');\n    needClarification = true;\n  }\n}\n// SEARCH_HOTEL - Cần location hint\nelse if (intent === 'SEARCH_HOTEL') {\n  if (!hasLocationHint) {\n    missingSlots.push('location');\n    needClarification = true;\n  }\n}\n// SEARCH_TOUR - Cần duration\nelse if (intent === 'SEARCH_TOUR') {\n  if (!tourDuration) {\n    missingSlots.push('duration');\n    needClarification = true;\n  }\n}\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  messageLower: data.messageLower,\n  userLocation: data.userLocation,\n  intent: data.intent,\n  confidence: data.confidence,\n  hasLocationHint,\n  isNearMe,\n  hasUserLocation,\n  hasPlaceName,\n  hasTimeHint,\n  tourDuration,\n  missingSlots,\n  needClarification\n};"
+        "jsCode": "// ===== CHECK REQUIRED SLOTS (SLOT SCHEMA) =====\nconst data = $json;\nconst msg = data.messageLower || '';\nconst intent = data.intent || 'UNKNOWN';\nconst userLocation = data.userLocation || null;\n\nconst hasPlaceName = /đền|chùa|nhà thờ|bảo tàng|lăng|hồ(?:\\s|$)|núi(?:\\s|$)|biển|hang|động|thác|cầu|công viên|di tích/.test(msg);\nconst hasLocation = /ở\\s|tại\\s|gần\\s(?!tôi)|quanh\\s(?!tôi)|khu vực|hà nội|sài gòn|đà nẵng|ninh bình|huế|nha trang|đà lạt|phú quốc|hội an|hạ long|quảng ninh/.test(msg);\nconst hasUserLocation = !!(userLocation && userLocation.lat && userLocation.lng);\nconst hasDateTime = /hôm nay|ngày mai|cuối tuần|tuần này|tuần tới|\\d+\\/\\d+/.test(msg);\nconst durationMatch = msg.match(/(\\d+)\\s*ngày/);\nconst duration = durationMatch ? parseInt(durationMatch[1]) : null;\n\nlet needClarification = false;\nlet clarificationMessage = '';\nlet pipelineType = 'none';\nlet missingSlots = [];\n\nswitch (intent) {\n  case 'GET_DISTANCE':\n    const distMatch = msg.match(/từ\\s+(.+?)\\s+(?:đến|tới|sang)\\s+(.+?)(?:\\s+(?:là|bao|mất|khoảng)|[?.!]|$)/i);\n    if (distMatch) {\n      pipelineType = 'distance';\n    } else if (hasLocation || hasPlaceName) {\n      needClarification = true;\n      missingSlots.push('origin');\n      clarificationMessage = '📍 Bạn muốn tính khoảng cách từ đâu?\\n\\nVí dụ: \"Từ Hà Nội đến Ninh Bình\" hoặc cho phép truy cập vị trí.';\n    } else {\n      needClarification = true;\n      missingSlots.push('origin', 'destination');\n      clarificationMessage = '📍 Bạn muốn tính khoảng cách giữa hai điểm nào?\\n\\nVí dụ: \"Khoảng cách từ Hà Nội đến Đà Nẵng\"';\n    }\n    break;\n  case 'GET_WEATHER':\n    if (!hasLocation && !hasPlaceName) {\n      needClarification = true;\n      missingSlots.push('location');\n      clarificationMessage = '🌦️ Bạn muốn xem thời tiết ở đâu?\\n\\nVí dụ: Hà Nội, Đà Nẵng, Ninh Bình...';\n    } else { pipelineType = 'geocode'; }\n    break;\n  case 'SEARCH_POI':\n    if (!hasLocation && !hasPlaceName) {\n      needClarification = true;\n      missingSlots.push('location');\n      clarificationMessage = '🏞️ Bạn muốn tìm địa điểm du lịch ở đâu?\\n\\nVí dụ: Hà Nội, Ninh Bình, Đà Nẵng...';\n    } else { pipelineType = 'geocode'; }\n    break;\n  case 'SEARCH_TOUR':\n    if (!duration) {\n      needClarification = true;\n      missingSlots.push('duration');\n      clarificationMessage = '🧳 Bạn muốn tìm tour bao nhiêu ngày?\\n\\nVí dụ: \"Tour 3 ngày Đà Nẵng\", \"Tour 5 ngày Phú Quốc\"...';\n    } else { pipelineType = 'textFilter'; }\n    break;\n  case 'GET_PLACE_INFO':\n    if (!hasPlaceName) {\n      needClarification = true;\n      missingSlots.push('place_name');\n      clarificationMessage = '📍 Bạn muốn xem thông tin địa điểm nào?\\n\\nVí dụ: Đền Thái Vi, Chùa Bái Đính, Hồ Hoàn Kiếm...';\n    } else { pipelineType = 'placeName'; }\n    break;\n  case 'SEARCH_HOTEL':\n    if (!hasLocation && !hasPlaceName) {\n      needClarification = true;\n      missingSlots.push('location');\n      clarificationMessage = '🏨 Bạn muốn tìm khách sạn ở đâu?\\n\\nVí dụ: Hà Nội, Đà Nẵng, Quận 1 Sài Gòn...';\n    } else { pipelineType = 'geocode'; }\n    break;\n  case 'SEARCH_NEARBY':\n    if (!hasUserLocation) {\n      needClarification = true;\n      missingSlots.push('user_location');\n      clarificationMessage = '📍 Để tìm địa điểm gần bạn, vui lòng cho phép truy cập vị trí.\\n\\nHoặc cho biết khu vực bạn đang ở (VD: \"Quận 1 Sài Gòn\")';\n    } else { pipelineType = 'userLocation'; }\n    break;\n  default:\n    needClarification = true;\n    clarificationMessage = 'Tôi có thể giúp bạn:\\n\\n🌦️ Xem thời tiết\\n🏞️ Tìm địa điểm du lịch\\n🧳 Tìm tour\\n📍 Thông tin địa điểm\\n🏨 Tìm khách sạn\\n📍 Tìm gần tôi\\n📏 Tính khoảng cách\\n\\nVí dụ: \"Thời tiết Hà Nội\" hoặc \"Từ Hà Nội đến Đà Nẵng bao xa?\"';\n}\n\nconsole.log('[Fn_CheckSlots] Intent:', intent, '| Pipeline:', pipelineType, '| Need clarify:', needClarification);\n\nreturn {\n  ...data,\n  hasPlaceName, hasLocation, hasUserLocation, hasDateTime, duration,\n  missingSlots, needClarification, clarificationMessage, pipelineType\n};"
       },
       "id": "6661cacf-8468-4fc4-a8c7-2194fee08157",
       "name": "Fn_CheckRequiredSlots",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        57696,
-        68304
+        57472,
+        68400
       ]
     },
     {
       "parameters": {
         "conditions": {
           "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
+            "caseSensitive": false
           },
           "conditions": [
             {
-              "leftValue": "={{ $json.needClarification }}",
+              "leftValue": "={{ $json.needClarification === true }}",
               "rightValue": true,
               "operator": {
                 "type": "boolean",
@@ -125,25 +80,25 @@
         "options": {}
       },
       "id": "78a1e412-7eed-4b7e-9471-7f72c8f92e3c",
-      "name": "IF_NeedIntentClarification",
+      "name": "IF_NeedClarification",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        57920,
-        68304
+        57696,
+        68400
       ]
     },
     {
       "parameters": {
-        "jsCode": "// ===== GUIDE USER (AGODA-STYLE) =====\n// Mission: Xoay user về hướng rõ ràng - KHÔNG hỏi mơ hồ\n\nreturn {\n  response: 'Bạn đang muốn:\\n\\n📍 Xem thông tin địa điểm (giá vé, giờ mở cửa)\\n🏞️ Tìm địa điểm du lịch\\n🏚️ Tìm khách sạn\\n🧳 Tìm tour trọn gói\\n🌦️ Xem thời tiết\\n📍 Tìm điểm gần tôi\\n\\nVí dụ: \"Thông tin đền Thái Vi\" hoặc \"Tìm 3 điểm du lịch gần tôi\"',\n  type: 'guide_user'\n};"
+        "jsCode": "// Return clarification message + metrics\nlet _st = null, _sid = null;\ntry { _st = $('Fn_NormalizeInput').item.json._startTime; _sid = $('Fn_NormalizeInput').item.json.sessionId; } catch(e) {}\nreturn {\n  response: $json.clarificationMessage || 'Vui lòng cung cấp thêm thông tin.',\n  type: 'clarification',\n  intent: $json.intent,\n  missingSlots: $json.missingSlots,\n  _log: {\n    sessionId: _sid || 'unknown',\n    intent: $json.intent || 'UNKNOWN',\n    latencyMs: _st ? Date.now() - _st : 0,\n    cacheHitWeather: false, cacheHitDistance: false,\n    knowledgeHit: false, fallbackTriggered: false,\n    clarificationTriggered: true, errorType: null\n  }\n};"
       },
-      "id": "75036388-2e81-49ee-ae1a-652ee1c16f20",
-      "name": "Respond_ClarifyIntent",
+      "id": "75036388-respond-clarify",
+      "name": "Respond_Clarify",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        61600,
-        69008
+        57920,
+        68600
       ]
     },
     {
@@ -153,15 +108,13 @@
             {
               "conditions": {
                 "options": {
-                  "caseSensitive": true,
-                  "leftValue": "",
-                  "typeValidation": "strict",
+                  "caseSensitive": false,
                   "version": 2
                 },
                 "conditions": [
                   {
-                    "leftValue": "={{ $json.intent }}",
-                    "rightValue": "SEARCH_NEARBY",
+                    "leftValue": "={{ $json.pipelineType }}",
+                    "rightValue": "geocode",
                     "operator": {
                       "type": "string",
                       "operation": "equals"
@@ -171,20 +124,18 @@
                 "combinator": "and"
               },
               "renameOutput": true,
-              "outputKey": "Nearby"
+              "outputKey": "Geocode"
             },
             {
               "conditions": {
                 "options": {
-                  "caseSensitive": true,
-                  "leftValue": "",
-                  "typeValidation": "strict",
+                  "caseSensitive": false,
                   "version": 2
                 },
                 "conditions": [
                   {
-                    "leftValue": "={{ $json.intent }}",
-                    "rightValue": "SEARCH_TOUR",
+                    "leftValue": "={{ $json.pipelineType }}",
+                    "rightValue": "placeName",
                     "operator": {
                       "type": "string",
                       "operation": "equals"
@@ -194,20 +145,18 @@
                 "combinator": "and"
               },
               "renameOutput": true,
-              "outputKey": "Tour"
+              "outputKey": "PlaceName"
             },
             {
               "conditions": {
                 "options": {
-                  "caseSensitive": true,
-                  "leftValue": "",
-                  "typeValidation": "strict",
+                  "caseSensitive": false,
                   "version": 2
                 },
                 "conditions": [
                   {
-                    "leftValue": "={{ $json.intent }}",
-                    "rightValue": "GET_PLACE_INFO",
+                    "leftValue": "={{ $json.pipelineType }}",
+                    "rightValue": "userLocation",
                     "operator": {
                       "type": "string",
                       "operation": "equals"
@@ -217,7 +166,49 @@
                 "combinator": "and"
               },
               "renameOutput": true,
-              "outputKey": "PlaceInfo"
+              "outputKey": "UserLocation"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.pipelineType }}",
+                    "rightValue": "textFilter",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "TextFilter"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.pipelineType }}",
+                    "rightValue": "distance",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Distance"
             }
           ]
         },
@@ -225,70 +216,520 @@
           "fallbackOutput": "extra"
         }
       },
-      "id": "switch-special-intent",
-      "name": "Switch_SpecialIntent",
+      "id": "b9c7e234-switch-pipeline",
+      "name": "Switch_Pipeline",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
       "position": [
+        57920,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== EXTRACT LOCATION =====\n// Phase 1: Strip temporal phrases\n// Phase 2: Extract location from cleaned text\n\nconst message = ($json.message || '').trim();\nconst msgLower = message.toLowerCase();\n\nconst temporalPatterns = [\n  /\\b(hôm nay|hôm qua|ngày mai|ngày kia)\\b/gi,\n  /\\b(cuối tuần|tuần này|tuần tới|tuần sau)\\b/gi,\n  /\\b(sáng nay|chiều nay|tối nay|đêm nay)\\b/gi,\n  /\\b(sáng mai|chiều mai|tối mai)\\b/gi,\n  /\\b(thứ\\s*[2-7]|chủ nhật)\\b/gi\n];\n\nlet cleanedMsg = msgLower;\nlet detectedTime = null;\n\nfor (const pattern of temporalPatterns) {\n  const match = cleanedMsg.match(pattern);\n  if (match && !detectedTime) detectedTime = match[0].trim();\n  cleanedMsg = cleanedMsg.replace(pattern, ' ');\n}\ncleanedMsg = cleanedMsg.replace(/\\s+/g, ' ').trim();\n\nlet locationRaw = null;\n\nconst matchAfter = cleanedMsg.match(/(?:\\bở|\\btại|\\bgần|\\bquanh)\\s+([^,?.!]+)/i);\nif (matchAfter) {\n  locationRaw = matchAfter[1].trim()\n    .replace(/\\s+(nhất|đẹp|nổi tiếng|hay|tốt|xa|ngon).*$/i, '')\n    .replace(/^\\d+\\s*/, '')\n    .trim();\n}\n\nif (!locationRaw) {\n  const placeMatch = cleanedMsg.match(/(?:đền|chùa|lăng|miếu|hồ|núi|bãi|công viên|bảo tàng|di tích)\\s+([\\p{L}\\s]+?)(?:\\s+(giá|giờ|thông)|$)/iu);\n  if (placeMatch) {\n    locationRaw = placeMatch[0].replace(/\\s+(giá|giờ|thông).*$/i, '').trim();\n  }\n}\n\nif (!locationRaw) {\n  const landmarks = ['hồ hoàn kiếm', 'hồ gươm', 'lăng bác', 'chùa một cột', 'chùa bái đính', 'tràng an', 'tam cốc', 'vịnh hạ long', 'động phong nha', 'đền thái vi', 'bà nà hills', 'sapa', 'sa pa', 'phố cổ hội an', 'cố đô huế', 'mũi né', 'núi bà đen'];\n  for (const place of landmarks) {\n    if (cleanedMsg.includes(place)) { locationRaw = place; break; }\n  }\n}\n\nif (!locationRaw) {\n  const cities = ['hà nội', 'sài gòn', 'hồ chí minh', 'đà nẵng', 'huế', 'nha trang', 'phú quốc', 'hội an', 'đà lạt', 'sapa', 'hạ long', 'ninh bình', 'quảng ninh', 'quảng bình'];\n  for (const city of cities) {\n    if (cleanedMsg.includes(city)) { locationRaw = city; break; }\n  }\n}\n\nif (locationRaw) {\n  locationRaw = locationRaw.replace(/[?!.]*$/, '').trim();\n  if (['tôi', 'đây', 'đâu'].includes(locationRaw.toLowerCase())) locationRaw = null;\n}\n\nconsole.log('[Fn_ExtractLocation] Raw:', message, '| Location:', locationRaw, '| Time:', detectedTime);\n\nreturn {\n  ...$json,\n  location: locationRaw,\n  detectedTime: detectedTime,\n  cleanedMessage: cleanedMsg\n};"
+      },
+      "id": "a394e134-extract-location",
+      "name": "Fn_ExtractLocation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
         58144,
-        68208
+        68400
       ]
     },
     {
       "parameters": {
         "conditions": {
           "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
+            "caseSensitive": false
           },
           "conditions": [
             {
-              "leftValue": "={{ $json.hasUserLocation }}",
-              "rightValue": false,
+              "leftValue": "={{ $json.location }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6b174c18-location-valid",
+      "name": "IF_LocationValid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        58368,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "let _st = null, _sid = null, _intent = null;\ntry { const _ni = $('Fn_NormalizeInput').item.json; _st = _ni._startTime; _sid = _ni.sessionId; } catch(e) {}\ntry { _intent = $('Fn_DetectIntentRuleBased').item.json.intent; } catch(e) {}\nreturn {\n  response: '❌ Không thể xác định địa điểm.\\n\\nVui lòng cung cấp rõ hơn, ví dụ:\\n• Hà Nội\\n• Đền Thái Vi\\n• Quận 1, Sài Gòn',\n  type: 'error',\n  _log: {\n    sessionId: _sid || 'unknown', intent: _intent || 'UNKNOWN',\n    latencyMs: _st ? Date.now() - _st : 0,\n    cacheHitWeather: false, cacheHitDistance: false,\n    knowledgeHit: false, fallbackTriggered: false,\n    clarificationTriggered: false, errorType: 'location_invalid'\n  }\n};"
+      },
+      "id": "1607049d-location-invalid",
+      "name": "Respond_LocationInvalid",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58592,
+        68600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== NORMALIZE ALIAS =====\n// Contract: DB stores lowercase, no-diacritics, underscore-separated aliases\n\nconst data = $json;\nconst raw = (data.location || '').toLowerCase().trim();\n\nfunction normalizeAlias(text) {\n  if (!text) return null;\n  return text\n    .replace(/\\s+/g, ' ').trim()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'D')\n    .replace(/[.,!?;:'\\\"()\\[\\]{}]/g, '')\n    .replace(/\\s+/g, '_')\n    .replace(/_+/g, '_')\n    .replace(/^_|_$/g, '')\n    .toLowerCase() || null;\n}\n\nconst normalized_alias = normalizeAlias(raw);\nconsole.log('[Fn_NormalizeAlias] Raw:', raw, '| Normalized:', normalized_alias);\n\nreturn {\n  ...data,\n  place: { raw: raw, normalized: normalized_alias },\n  normalized_alias: normalized_alias,\n  intent: data.intent\n};"
+      },
+      "id": "fn-normalize-alias",
+      "name": "Fn_NormalizeAlias",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58592,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT canonical_name, lat, lng, place_type, admin_level, priority FROM poi_override WHERE status = 'active' AND aliases ? '{{ $json.normalized_alias }}' AND intent_support ? '{{ $json.intent }}' ORDER BY admin_level DESC, priority DESC LIMIT 1;"
+      },
+      "id": "db-poi-lookup",
+      "name": "DB_POI_Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        58816,
+        68400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== DB RESULT GUARD =====\nconst items = $input.all();\n\nif (items.length > 0 && items[0].json && Object.keys(items[0].json).length > 0) {\n  const row = items[0].json;\n  console.log('[DBResultGuard] DB HIT:', row.canonical_name);\n  return [{ json: { ...row, dbMatch: true } }];\n} else {\n  console.log('[DBResultGuard] DB MISS');\n  return [{ json: { dbMatch: false } }];\n}"
+      },
+      "id": "fn-db-result-guard",
+      "name": "Fn_DBResultGuard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59040,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.dbMatch === true }}",
+              "rightValue": true,
               "operator": {
                 "type": "boolean",
                 "operation": "equals"
               }
             }
           ],
-          "combinator": "or"
+          "combinator": "and"
         },
         "options": {}
       },
-      "id": "if-nearby-no-location",
-      "name": "IF_Nearby_NoLocation",
+      "id": "if-db-match",
+      "name": "IF_DBMatch",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        58368,
-        67904
+        59264,
+        68400
       ]
     },
     {
       "parameters": {
-        "jsCode": "return {\n  response: '📍 Để tìm địa điểm gần bạn, vui lòng cho phép truy cập vị trí của bạn.\\n\\nBạn có thể:\\n1. Bật định vị trên thiết bị\\n2. Hoặc cho biết khu vực bạn đang ở (VD: \"Quận 1 Sài Gòn\")',\n  type: 'request_location_permission',\n  require_location: true\n};"
+        "jsCode": "// ===== USE DB RESULT (FAST PATH) =====\n// Bypass geocode API when DB has authoritative match\nconst extractData = $('Fn_ExtractLocation').item.json;\nconst dbResult = $json;\n\nconst lat = parseFloat(dbResult.lat);\nconst lng = parseFloat(dbResult.lng);\n\nconsole.log('[Fn_UseDBResult] DB HIT:', dbResult.canonical_name, '| Coords:', lat, lng);\n\nreturn {\n  ...extractData,\n  locationDisplay: dbResult.canonical_name,\n  coordinates: lat + ',' + lng,\n  geocoded: true,\n  lat: lat,\n  lng: lng,\n  source: 'poi_override_db',\n  place_type: dbResult.place_type,\n  db_priority: dbResult.priority\n};"
       },
-      "id": "respond-request-location",
-      "name": "Respond_RequestLocation",
+      "id": "fn-use-db-result",
+      "name": "Fn_UseDBResult",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        61600,
-        67712
+        59488,
+        68300
       ]
     },
     {
       "parameters": {
-        "jsCode": "// ===== BUILD NEARBY SEARCH (AGODA-STYLE) =====\n// Mission: Xây dựng query tìm kiếm theo tọa độ user\n// ⚡ CHỈ ở ĐÂY mới fallback default coords (SAU KHI biết intent)\n\nconst data = $json;\n\n// Fallback default coords nếu client không gửi\nconst finalUserLocation = (!data.userLocation || !data.userLocation.lat || !data.userLocation.lng) \n  ? { lat: 21.0285, lng: 105.8542, source: 'device-default' }\n  : data.userLocation;\n\nconst lat = finalUserLocation.lat;\nconst lng = finalUserLocation.lng;\n\n// Xác định loại địa điểm từ message\nconst msg = data.messageLower;\nlet poiType = 'địa điểm du lịch';\n\nif (msg.includes('ăn') || msg.includes('quán') || msg.includes('nhà hàng')) {\n  poiType = 'nhà hàng quán ăn';\n} else if (msg.includes('cafe') || msg.includes('cà phê')) {\n  poiType = 'quán cafe';\n} else if (msg.includes('khách sạn') || msg.includes('hotel')) {\n  poiType = 'khách sạn';\n}\n\n// Extract số lượng nếu có\nconst countMatch = msg.match(/(\\d+)\\s*(?:điểm|chỗ|nơi|địa điểm)/);\nconst requestedCount = countMatch ? parseInt(countMatch[1]) : 5;\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  intent: 'SEARCH_NEARBY',\n  userLocation: finalUserLocation,\n  coordinates: `${lat},${lng}`,\n  searchQuery: `${poiType} gần ${lat},${lng}`,\n  poiType,\n  requestedCount: Math.min(requestedCount, 10)\n};"
+        "url": "https://geocode.search.hereapi.com/v1/geocode",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.location }}"
+            },
+            {
+              "name": "apiKey",
+              "value": "={{ $env.HERE_API_KEY || 'DyD7QbF6uEeLGB47HYJ-ixnpiuYuS_HNFVaZso01_lQ' }}"
+            },
+            {
+              "name": "lang",
+              "value": "vi-VN"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            },
+            {
+              "name": "in",
+              "value": "countryCode:VNM"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "806ae408-geocode",
+      "name": "HTTP_Geocode",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59488,
+        68550
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE GEOCODE RESPONSE =====\nconst prevData = $('Fn_ExtractLocation').item.json;\nconst res = $json;\n\nlet lat = null, lng = null, displayName = null, success = false;\n\nif (res.items && res.items.length > 0 && res.items[0].position) {\n  lat = res.items[0].position.lat;\n  lng = res.items[0].position.lng;\n  displayName = res.items[0].title || prevData.location;\n  success = true;\n}\n\nconst coordinates = success ? lat + ',' + lng : null;\nconsole.log('[Fn_ParseGeocode] Success:', success, '| Coords:', coordinates);\n\nreturn {\n  ...prevData,\n  locationDisplay: displayName || prevData.location,\n  coordinates: coordinates,\n  geocoded: success,\n  lat: lat,\n  lng: lng,\n  source: 'here_api'\n};"
+      },
+      "id": "0ff38a7e-parse-geocode",
+      "name": "Fn_ParseGeocode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59712,
+        68550
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.coordinates }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "70536312-geocode-success",
+      "name": "IF_GeocodeSuccess",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        59936,
+        68550
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const location = $json.location || 'địa điểm';\nlet _st = null, _sid = null, _intent = null;\ntry { const _ni = $('Fn_NormalizeInput').item.json; _st = _ni._startTime; _sid = _ni.sessionId; } catch(e) {}\ntry { _intent = $('Fn_DetectIntentRuleBased').item.json.intent; } catch(e) {}\nreturn {\n  response: '❌ Không tìm thấy tọa độ cho \"' + location + '\".\\n\\nVui lòng thử:\\n• Thêm tỉnh/thành phố (VD: Đền Thái Vi, Ninh Bình)\\n• Dùng tên phổ biến hơn',\n  type: 'geocode_failed',\n  _log: {\n    sessionId: _sid || 'unknown', intent: _intent || 'UNKNOWN',\n    latencyMs: _st ? Date.now() - _st : 0,\n    cacheHitWeather: false, cacheHitDistance: false,\n    knowledgeHit: false, fallbackTriggered: false,\n    clarificationTriggered: false, errorType: 'geocode_failed'\n  }\n};"
+      },
+      "id": "560a2e50-geocode-failed",
+      "name": "Respond_GeocodeFailed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60160,
+        68700
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_POI",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "POI"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "GET_WEATHER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Weather"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "SEARCH_HOTEL",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Hotel"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "f8548ae8-route-api",
+      "name": "Switch_RouteToAPI",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        60160,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== RESOLVE PLACE NAME (for GET_PLACE_INFO) =====\n// Enhanced: Also check DB canonical_name for better search accuracy\nconst msg = $json.messageLower || '';\nlet placeName = null;\n\n// Strategy 1: Place type keywords\nconst placeMatch = msg.match(/(?:đền|chùa|lăng|miếu|hồ|núi|bãi biển|công viên|bảo tàng|di tích|khu)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+giá|\\s+giờ|\\s+thông|\\s+cuối|\\s+hôm|\\s+\\?|$)/i);\nif (placeMatch) {\n  placeName = placeMatch[0].replace(/giá|giờ|thông.*$|cuối.*$|hôm.*$|\\?/gi, '').trim();\n}\n\n// Strategy 2: Famous landmarks\nif (!placeName) {\n  const landmarks = ['hồ hoàn kiếm', 'hồ gươm', 'lăng bác', 'chùa một cột', 'chùa bái đính', 'tràng an', 'tam cốc', 'vịnh hạ long', 'phố cổ hội an', 'bà nà hills', 'sapa', 'cố đô huế', 'mũi né', 'núi bà đen', 'động phong nha'];\n  const found = landmarks.find(l => msg.includes(l));\n  if (found) placeName = found;\n}\n\nif (!placeName) {\n  console.log('[Fn_ResolvePlaceName] WARN: No place name found in message');\n}\n\nconsole.log('[Fn_ResolvePlaceName] PlaceName:', placeName);\n\nreturn {\n  ...$json,\n  placeName,\n  locationDisplay: placeName\n};"
+      },
+      "id": "fn-resolve-placename",
+      "name": "Fn_ResolvePlaceName",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58144,
+        68200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== NORMALIZE PLACE ALIAS (for Knowledge Layer DB lookup) =====\nconst data = $json;\nconst raw = (data.placeName || data.locationDisplay || '').toLowerCase().trim();\n\nfunction normalizeAlias(text) {\n  if (!text) return null;\n  return text\n    .replace(/\\s+/g, ' ').trim()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'D')\n    .replace(/[.,!?;:'\\\"()\\[\\]{}]/g, '')\n    .replace(/\\s+/g, '_')\n    .replace(/_+/g, '_')\n    .replace(/^_|_$/g, '')\n    .toLowerCase() || null;\n}\n\nconst placeAlias = normalizeAlias(raw);\nconsole.log('[Fn_NormalizePlaceAlias] Raw:', raw, '| Alias:', placeAlias);\n\nreturn { ...data, placeAlias };"
+      },
+      "id": "fn-normalize-place-alias",
+      "name": "Fn_NormalizePlaceAlias",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58368,
+        68200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT canonical_name, description, opening_hours_json, ticket_price_json, address, lat, lng, place_type, last_verified_at FROM poi_override WHERE status = 'active' AND aliases ? '{{ $json.placeAlias }}' AND intent_support ? 'GET_PLACE_INFO' ORDER BY admin_level DESC, priority DESC LIMIT 1;"
+      },
+      "id": "db-place-metadata-lookup",
+      "name": "DB_PlaceMetadataLookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        58592,
+        68200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PLACE METADATA GUARD =====\nconst items = $input.all();\n\nif (items.length > 0 && items[0].json && Object.keys(items[0].json).length > 0) {\n  const row = items[0].json;\n  const hasMetadata = !!(row.description || row.ticket_price_json || row.opening_hours_json);\n  console.log('[PlaceMetadataGuard] DB HIT:', row.canonical_name, '| Has metadata:', hasMetadata);\n  return [{ json: { ...row, dbMatch: true, hasMetadata: hasMetadata } }];\n} else {\n  console.log('[PlaceMetadataGuard] DB MISS');\n  return [{ json: { dbMatch: false, hasMetadata: false } }];\n}"
+      },
+      "id": "fn-place-metadata-guard",
+      "name": "Fn_PlaceMetadataGuard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        58816,
+        68200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.dbMatch === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            },
+            {
+              "leftValue": "={{ $json.hasMetadata === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-has-place-metadata",
+      "name": "IF_HasPlaceMetadata",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        59040,
+        68200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT PLACE INFO FROM DB (Knowledge Layer) =====\n// Contract: Output MUST match Fn_FormatPlaceInfo output exactly\nconst dbData = $json;\nconst resolveData = $('Fn_ResolvePlaceName').item.json;\n\nconst place_info = {\n  name: dbData.canonical_name || resolveData.placeName,\n  description: dbData.description || null,\n  ticket_price: null,\n  opening_hours: null,\n  address: dbData.address || null\n};\n\n// Format ticket_price from JSONB\nif (dbData.ticket_price_json) {\n  const tp = typeof dbData.ticket_price_json === 'string'\n    ? JSON.parse(dbData.ticket_price_json) : dbData.ticket_price_json;\n  const parts = [];\n  if (tp.adult) parts.push('Người lớn: ' + tp.adult);\n  if (tp.child) parts.push('Trẻ em: ' + tp.child);\n  if (tp.child_1m_1m4) parts.push('Trẻ 1m-1m4: ' + tp.child_1m_1m4);\n  if (tp.ve_tham_quan) parts.push(tp.ve_tham_quan);\n  if (tp.ho) parts.push('Hồ: ' + tp.ho);\n  if (tp.den_ngoc_son) parts.push('Đền Ngọc Sơn: ' + tp.den_ngoc_son);\n  if (tp.cap_treo_fansipan) parts.push('Cáp treo Fansipan: ' + tp.cap_treo_fansipan);\n  if (tp.cap_treo_1_chieu) parts.push('Cáp treo 1 chiều: ' + tp.cap_treo_1_chieu);\n  if (tp.cap_treo_2_chieu) parts.push('Cáp treo 2 chiều: ' + tp.cap_treo_2_chieu);\n  if (tp.xe_dien) parts.push('Xe điện: ' + tp.xe_dien);\n  if (tp.thuyen) parts.push('Thuyền: ' + tp.thuyen);\n  if (tp.combo) parts.push('Combo: ' + tp.combo);\n  if (tp.pho_co) parts.push('Phố cổ: ' + tp.pho_co);\n  if (tp.doi_cat_trang) parts.push('Đồi cát trắng: ' + tp.doi_cat_trang);\n  if (tp.doi_cat_hong) parts.push('Đồi cát hồng: ' + tp.doi_cat_hong);\n  if (tp.note) parts.push(tp.note);\n  place_info.ticket_price = parts.length > 0 ? parts.join('. ') : null;\n}\n\n// Format opening_hours from JSONB\nif (dbData.opening_hours_json) {\n  const oh = typeof dbData.opening_hours_json === 'string'\n    ? JSON.parse(dbData.opening_hours_json) : dbData.opening_hours_json;\n  const parts = [];\n  if (oh.default) parts.push(oh.default);\n  if (oh.tue_thu) parts.push('Thứ 3-5: ' + oh.tue_thu);\n  if (oh.sat_sun) parts.push('Thứ 7-CN: ' + oh.sat_sun);\n  if (oh.summer) parts.push('Mùa hè: ' + oh.summer);\n  if (oh.pho_co) parts.push('Phố cổ: ' + oh.pho_co);\n  if (oh.di_tich) parts.push('Di tích: ' + oh.di_tich);\n  if (oh.den_ngoc_son) parts.push('Đền Ngọc Sơn: ' + oh.den_ngoc_son);\n  if (oh.cap_treo) parts.push('Cáp treo: ' + oh.cap_treo);\n  if (oh.cap_treo_fansipan) parts.push('Cáp treo Fansipan: ' + oh.cap_treo_fansipan);\n  if (oh.thi_tran) parts.push('Thị trấn: ' + oh.thi_tran);\n  if (oh.bai_bien) parts.push('Bãi biển: ' + oh.bai_bien);\n  if (oh.doi_cat) parts.push('Đồi cát: ' + oh.doi_cat);\n  if (oh.khu_du_lich) parts.push('Khu du lịch: ' + oh.khu_du_lich);\n  if (oh.closed) parts.push('Đóng cửa: ' + oh.closed);\n  if (oh.note) parts.push(oh.note);\n  place_info.opening_hours = parts.length > 0 ? parts.join('. ') : null;\n}\n\n// Temporal intelligence (is_open_now)\nlet is_open_now = null;\nlet open_status_text = null;\nif (dbData.opening_hours_json) {\n  const _oh = typeof dbData.opening_hours_json === 'string'\n    ? JSON.parse(dbData.opening_hours_json) : dbData.opening_hours_json;\n  const _defaultHours = _oh.default || null;\n  if (_defaultHours) {\n    const _tm = _defaultHours.match(/(\\d{1,2})[h:](\\d{0,2})\\s*-\\s*(\\d{1,2})[h:](\\d{0,2})/);\n    if (_tm) {\n      const _openH = parseInt(_tm[1]), _openM = parseInt(_tm[2] || '0');\n      const _closeH = parseInt(_tm[3]), _closeM = parseInt(_tm[4] || '0');\n      const _now = new Date();\n      const _vnH = (_now.getUTCHours() + 7) % 24, _vnM = _now.getUTCMinutes();\n      const _curMins = _vnH * 60 + _vnM;\n      const _openMins = _openH * 60 + _openM, _closeMins = _closeH * 60 + _closeM;\n      is_open_now = _curMins >= _openMins && _curMins <= _closeMins;\n      open_status_text = is_open_now\n        ? 'Đang mở cửa (' + _defaultHours + ')'\n        : 'Đã đóng cửa (mở lại lúc ' + _tm[1] + ':' + (_tm[2] || '00').padStart(2, '0') + ')';\n    }\n  }\n}\nplace_info.is_open_now = is_open_now;\nplace_info.open_status_text = open_status_text;\n\nconsole.log('[Fn_FormatPlaceFromDB] Name:', place_info.name, '| Source: knowledge_db', '| Open:', is_open_now);\n\nreturn {\n  intent: 'GET_PLACE_INFO',\n  place_info,\n  location: resolveData.placeName,\n  has_results: true,\n  source: 'knowledge_db'\n};"
+      },
+      "id": "fn-format-place-from-db",
+      "name": "Fn_FormatPlaceFromDB",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59264,
+        68100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google"
+            },
+            {
+              "name": "q",
+              "value": "={{ $('Fn_PlaceMetadataGuard').item.json.canonical_name || $('Fn_ResolvePlaceName').item.json.locationDisplay }} giá vé giờ mở cửa thông tin"
+            },
+            {
+              "name": "hl",
+              "value": "vi"
+            },
+            {
+              "name": "gl",
+              "value": "vn"
+            },
+            {
+              "name": "num",
+              "value": "5"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "http-search-place-info",
+      "name": "HTTP_SearchPlaceInfo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59264,
+        68200
+      ],
+      "credentials": {
+        "serpApi": {
+          "id": "vD3y3KChuLVK1OPF",
+          "name": "SerpAPI account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT PLACE INFO (API fallback path) =====\nconst placeData = $('Fn_ResolvePlaceName').item.json;\nconst results = $json.organic_results || [];\nconst kg = $json.knowledge_graph || {};\n\nconst place_info = {\n  name: placeData.placeName || placeData.locationDisplay,\n  description: kg.description || (results[0]?.snippet || null),\n  ticket_price: null,\n  opening_hours: kg.hours || null,\n  address: kg.address || null\n};\n\n// Extract price and hours from snippets\nfor (const r of results) {\n  const snippet = (r.snippet || '').toLowerCase();\n  const priceMatch = snippet.match(/(\\d+[.,]?\\d*)\\s*(đ|vnđ|đồng|k|nghìn)/i);\n  if (priceMatch && !place_info.ticket_price) place_info.ticket_price = priceMatch[0];\n  const hoursMatch = snippet.match(/(\\d{1,2}[h:]\\d{0,2}\\s*-\\s*\\d{1,2}[h:]\\d{0,2})/i);\n  if (hoursMatch && !place_info.opening_hours) place_info.opening_hours = hoursMatch[0];\n}\n\n// Fallback: if no data found, provide user-friendly message\nif (!place_info.description && !place_info.ticket_price) {\n  console.log('[Fn_FormatPlaceInfo] WARN: No data found for', place_info.name);\n}\n\nconsole.log('[Fn_FormatPlaceInfo] Name:', place_info.name, '| HasDesc:', !!place_info.description, '| HasPrice:', !!place_info.ticket_price);\n\nreturn {\n  intent: 'GET_PLACE_INFO',\n  place_info,\n  location: placeData.placeName,\n  has_results: !!(place_info.description || place_info.ticket_price),\n  source: 'serpapi'\n};"
+      },
+      "id": "fn-format-place-info",
+      "name": "Fn_FormatPlaceInfo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59488,
+        68200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== BUILD NEARBY SEARCH =====\nconst data = $json;\n\nconst finalUserLocation = data.userLocation || { lat: 21.0285, lng: 105.8542, source: 'default' };\nconst lat = finalUserLocation.lat;\nconst lng = finalUserLocation.lng;\n\nconst msg = data.messageLower;\nlet poiType = 'địa điểm du lịch';\nif (/ăn|quán|nhà hàng/.test(msg)) poiType = 'nhà hàng quán ăn';\nelse if (/cafe|cà phê/.test(msg)) poiType = 'quán cafe';\nelse if (/khách sạn|hotel/.test(msg)) poiType = 'khách sạn';\n\nconst countMatch = msg.match(/(\\d+)\\s*(?:điểm|chỗ|nơi|địa điểm)/);\nconst requestedCount = countMatch ? Math.min(parseInt(countMatch[1]), 10) : 5;\n\nreturn {\n  ...data,\n  userLocation: finalUserLocation,\n  coordinates: `${lat},${lng}`,\n  poiType,\n  requestedCount\n};"
       },
       "id": "fn-build-nearby-search",
       "name": "Fn_BuildNearbySearch",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        58592,
-        67808
+        58144,
+        68000
       ]
     },
     {
@@ -330,84 +771,83 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        58816,
-        67808
+        58368,
+        68000
       ],
       "credentials": {
         "serpApi": {
           "id": "vD3y3KChuLVK1OPF",
           "name": "SerpAPI account 2"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "// ===== FORMAT NEARBY RESULTS =====\nconst prevData = $('Fn_BuildNearbySearch').item.json;\nconst apiData = $json;\n\nconst results = apiData.local_results || [];\nconst requestedCount = prevData.requestedCount || 5;\n\nif (results.length === 0) {\n  return {\n    intent: 'SEARCH_NEARBY',\n    nearby_raw: [],\n    location: 'vị trí của bạn',\n    poiType: prevData.poiType,\n    has_results: false\n  };\n}\n\nconst nearby_raw = results.slice(0, requestedCount).map((p, idx) => ({\n  rank: idx + 1,\n  name: p.title || 'N/A',\n  address: p.address || null,\n  rating: p.rating || null,\n  reviews: p.reviews || null,\n  type: p.type || prevData.poiType,\n  distance: p.distance || null\n}));\n\nreturn {\n  intent: 'SEARCH_NEARBY',\n  nearby_raw,\n  location: 'vị trí của bạn',\n  poiType: prevData.poiType,\n  requestedCount,\n  has_results: true\n};"
+        "jsCode": "// ===== FORMAT NEARBY + BUILD ORS REQUEST (MERGED) =====\n// WHY: Reduces 2 nodes into 1, both operate on same data\n// INPUT: SerpAPI local_results + user location from Fn_BuildNearbySearch\n// OUTPUT: formatted nearby_raw + ORS request body (if valid coords exist)\n\nconst prevData = $('Fn_BuildNearbySearch').item.json;\nconst results = $json.local_results || [];\nconst userLoc = prevData.userLocation;\n\n// === STEP 1: Format nearby results ===\nconst nearby_raw = results.slice(0, prevData.requestedCount).map((p, idx) => ({\n  rank: idx + 1,\n  name: p.title || 'N/A',\n  address: p.address || null,\n  rating: p.rating || null,\n  type: p.type || prevData.poiType,\n  distance: p.distance || null,\n  lat: p.gps_coordinates?.latitude || null,\n  lng: p.gps_coordinates?.longitude || null\n}));\n\nconst has_results = nearby_raw.length > 0;\n\n// === STEP 2: Build ORS matrix request ===\nconst validPlaces = nearby_raw.filter(p => p.lat != null && p.lng != null);\nlet orsSkipped = true;\nlet orsRequestBody = null;\nlet orsValidCount = 0;\n\nif (validPlaces.length > 0 && userLoc && userLoc.lat && userLoc.lng) {\n  // CRITICAL: ORS uses [lng, lat] NOT [lat, lng]\n  const locations = [\n    [userLoc.lng, userLoc.lat],\n    ...validPlaces.map(p => [p.lng, p.lat])\n  ];\n  orsRequestBody = {\n    locations,\n    sources: [0],\n    destinations: validPlaces.map((_, i) => i + 1),\n    metrics: ['distance', 'duration'],\n    units: 'm'\n  };\n  orsSkipped = false;\n  orsValidCount = validPlaces.length;\n  console.log('[FormatNearbyAndBuildORS] ORS request:', validPlaces.length, 'destinations');\n} else {\n  console.log('[FormatNearbyAndBuildORS] ORS skipped: no valid coordinates');\n}\n\nreturn {\n  intent: 'SEARCH_NEARBY',\n  nearby_raw,\n  location: 'vị trí của bạn',\n  poiType: prevData.poiType,\n  has_results,\n  userLocation: userLoc,\n  orsSkipped,\n  orsRequestBody,\n  orsValidCount\n};"
       },
-      "id": "fn-format-nearby",
-      "name": "Fn_FormatNearby",
+      "id": "fn-format-nearby-build-ors",
+      "name": "Fn_FormatNearbyAndBuildORS",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        59040,
-        67808
+        58592,
+        68000
       ]
     },
     {
       "parameters": {
-        "jsCode": "// ===== PARSE TOUR DURATION =====\n// Mission: Extract số ngày và location cho tour\n\nconst data = $json;\nconst msg = data.messageLower;\n\n// Extract duration\nlet duration = data.tourDuration || 3; // default 3 ngày\n\n// Extract location nếu có\nlet tourLocation = null;\nconst locationMatch = msg.match(/(?:ở|tại|đi|tour)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+\\d+|$)/i);\nif (locationMatch) {\n  tourLocation = locationMatch[1].trim();\n}\n\n// Fallback: tìm city names\nif (!tourLocation) {\n  const cities = ['hà nội', 'sài gòn', 'đà nẵng', 'huế', 'nha trang', 'phú quốc', 'hội an', 'đà lạt', 'sapa', 'hạ long', 'ninh bình', 'miền bắc', 'miền trung', 'miền nam', 'việt nam'];\n  const found = cities.find(c => msg.includes(c));\n  if (found) tourLocation = found;\n}\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  intent: 'SEARCH_TOUR',\n  tourDuration: duration,\n  tourLocation,\n  hasLocation: !!tourLocation\n};"
+        "method": "POST",
+        "url": "https://api.openrouteservice.org/v2/matrix/driving-car",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.orsRequestBody) }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "http-ors-matrix",
+      "name": "HTTP_ORS_Matrix",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        58816,
+        68000
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_ORS_CREDENTIAL_ID",
+          "name": "ORS API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== ENRICH WITH ROAD DISTANCES =====\nconst prevData = $('Fn_FormatNearbyAndBuildORS').item.json;\nconst orsResponse = $json;\nconst nearby = prevData.nearby_raw || [];\nconst userLoc = prevData.userLocation;\n\nfunction haversine(lat1, lng1, lat2, lng2) {\n  const R = 6371;\n  const dLat = (lat2 - lat1) * Math.PI / 180;\n  const dLng = (lng2 - lng1) * Math.PI / 180;\n  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +\n    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *\n    Math.sin(dLng/2) * Math.sin(dLng/2);\n  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));\n}\n\nconst orsDistances = orsResponse?.distances?.[0];\nconst orsDurations = orsResponse?.durations?.[0];\nconst orsOK = !prevData.orsSkipped && Array.isArray(orsDistances) && orsDistances.length > 0;\n\nif (orsOK) {\n  console.log('[ORS] Success:', orsDistances.length, 'distances received');\n} else {\n  console.log('[ORS] Fallback to Haversine');\n}\n\nlet orsDestIdx = 0;\nconst enriched = nearby.map(place => {\n  if (place.lat == null || place.lng == null) {\n    return { ...place, road_distance_km: null, drive_duration_min: null, distance_source: 'unavailable' };\n  }\n  if (orsOK && orsDestIdx < orsDistances.length) {\n    const distM = orsDistances[orsDestIdx];\n    const durS = orsDurations[orsDestIdx];\n    orsDestIdx++;\n    if (distM != null && durS != null) {\n      return {\n        ...place,\n        road_distance_km: Math.round(distM / 100) / 10,\n        drive_duration_min: Math.round(durS / 60),\n        distance_source: 'ors'\n      };\n    }\n  }\n  const km = haversine(userLoc.lat, userLoc.lng, place.lat, place.lng);\n  return {\n    ...place,\n    road_distance_km: Math.round(km * 10) / 10,\n    drive_duration_min: null,\n    distance_source: 'haversine'\n  };\n});\n\n// Relevance ranking\nconst _maxDist = Math.max(...enriched.filter(p => p.road_distance_km != null).map(p => p.road_distance_km), 0.1);\nconst ranked = enriched.map(place => {\n  const normDist = place.road_distance_km != null ? place.road_distance_km / _maxDist : 1;\n  const ratingScore = (place.rating || 3) / 5;\n  const score = 0.4 * (1 - normDist) + 0.3 * ratingScore + 0.2 * 0.5 + 0.1 * 0.5;\n  return { ...place, _relevanceScore: Math.round(score * 100) / 100 };\n});\nranked.sort((a, b) => b._relevanceScore - a._relevanceScore);\nconsole.log('[Ranking] Top:', ranked[0]?._relevanceScore, '| Bottom:', ranked[ranked.length-1]?._relevanceScore);\n\nreturn {\n  intent: 'SEARCH_NEARBY',\n  nearby_raw: ranked,\n  location: prevData.location,\n  poiType: prevData.poiType,\n  has_results: prevData.has_results,\n  userLocation: prevData.userLocation\n};"
+      },
+      "id": "fn-enrich-distances",
+      "name": "Fn_EnrichWithDistances",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59040,
+        68000
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== PARSE TOUR DURATION & LOCATION =====\nconst data = $json;\nconst msg = (data.messageLower || '').toLowerCase();\n\nconst durationMatch = msg.match(/(\\d+)\\s*ngày/);\nconst duration = durationMatch ? parseInt(durationMatch[1]) : 3;\n\nlet tourLocation = null;\n\nconst landmarks = {\n  'hồ hoàn kiếm': 'Hồ Hoàn Kiếm, Hà Nội',\n  'hồ gươm': 'Hồ Gươm, Hà Nội',\n  'tràng an': 'Tràng An, Ninh Bình',\n  'tam cốc': 'Tam Cốc, Ninh Bình',\n  'vịnh hạ long': 'Vịnh Hạ Long, Quảng Ninh',\n  'phố cổ hội an': 'Phố cổ Hội An',\n  'bà nà hills': 'Bà Nà Hills, Đà Nẵng',\n  'đền thái vi': 'Đền Thái Vi, Ninh Bình',\n  'chùa bái đính': 'Chùa Bái Đính, Ninh Bình',\n  'sapa': 'Sapa, Lào Cai'\n};\nfor (const [key, fullName] of Object.entries(landmarks)) {\n  if (msg.includes(key)) { tourLocation = fullName; break; }\n}\n\nif (!tourLocation) {\n  const cities = [\n    { pattern: 'hà nội', display: 'Hà Nội' },\n    { pattern: 'sài gòn', display: 'Sài Gòn' },\n    { pattern: 'đà nẵng', display: 'Đà Nẵng' },\n    { pattern: 'huế', display: 'Huế' },\n    { pattern: 'nha trang', display: 'Nha Trang' },\n    { pattern: 'phú quốc', display: 'Phú Quốc' },\n    { pattern: 'hội an', display: 'Hội An' },\n    { pattern: 'đà lạt', display: 'Đà Lạt' },\n    { pattern: 'hạ long', display: 'Hạ Long' },\n    { pattern: 'ninh bình', display: 'Ninh Bình' }\n  ];\n  const found = cities.find(c => msg.includes(c.pattern));\n  if (found) tourLocation = found.display;\n}\n\nif (!tourLocation) {\n  const locMatch = msg.match(/(?:ở|tại|đi)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+\\d+|[?.!,]|$)/i);\n  if (locMatch) {\n    tourLocation = locMatch[1].trim().replace(/\\s+(nhất|đẹp|hay|tốt|giúp|tôi).*$/i, '').trim();\n  }\n}\n\nif (tourLocation && ['tôi', 'đây', 'đâu'].includes(tourLocation.toLowerCase())) tourLocation = null;\n\nconsole.log('[Fn_ParseTourDuration] Duration:', duration, '| Location:', tourLocation);\n\nreturn {\n  ...data,\n  tourDuration: duration,\n  tourLocation,\n  hasLocation: !!tourLocation\n};"
       },
       "id": "fn-parse-tour-duration",
       "name": "Fn_ParseTourDuration",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        58368,
-        68112
-      ]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "leftValue": "={{ $json.hasLocation }}",
-              "rightValue": false,
-              "operator": {
-                "type": "boolean",
-                "operation": "equals"
-              }
-            }
-          ],
-          "combinator": "or"
-        },
-        "options": {}
-      },
-      "id": "if-tour-no-location",
-      "name": "IF_Tour_NoLocation",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [
-        58592,
-        68112
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "const duration = $json.tourDuration || '';\nreturn {\n  response: `📍 Bạn muốn tìm tour ${duration} ngày ở đâu?\\n\\nVí dụ: Đà Nẵng, Phú Quốc, Sapa, Hạ Long...`,\n  type: 'clarify_tour_location'\n};"
-      },
-      "id": "respond-clarify-tour-location",
-      "name": "Respond_ClarifyTourLocation",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        61600,
-        67904
+        58144,
+        67800
       ]
     },
     {
@@ -449,372 +889,28 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        58816,
-        68208
+        58368,
+        67800
       ],
       "credentials": {
         "serpApi": {
           "id": "vD3y3KChuLVK1OPF",
           "name": "SerpAPI account 2"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "// ===== FORMAT TOUR RESULTS =====\nconst prevData = $('Fn_ParseTourDuration').item.json;\nconst apiData = $json;\n\nconst results = apiData.organic_results || [];\n\nif (results.length === 0) {\n  return {\n    intent: 'SEARCH_TOUR',\n    tours_raw: [],\n    location: prevData.tourLocation,\n    duration: prevData.tourDuration,\n    has_results: false\n  };\n}\n\nconst tours_raw = results.slice(0, 5).map(t => ({\n  title: t.title || 'N/A',\n  snippet: t.snippet || null,\n  source: t.link || null,\n  provider: t.displayed_link || null\n}));\n\nreturn {\n  intent: 'SEARCH_TOUR',\n  tours_raw,\n  location: prevData.tourLocation,\n  duration: prevData.tourDuration,\n  has_results: true\n};"
+        "jsCode": "// ===== FORMAT TOUR RESULTS =====\nconst prevData = $('Fn_ParseTourDuration').item.json;\nconst results = $json.organic_results || [];\n\nconst tours_raw = results.slice(0, 5).map(t => ({\n  title: t.title || 'N/A',\n  snippet: t.snippet || null,\n  source: t.link || null,\n  provider: t.displayed_link || null\n}));\n\nconsole.log('[Fn_FormatTour] Tours found:', tours_raw.length, '| Location:', prevData.tourLocation);\n\nreturn {\n  intent: 'SEARCH_TOUR',\n  tours_raw,\n  location: prevData.tourLocation,\n  duration: prevData.tourDuration,\n  has_results: tours_raw.length > 0\n};"
       },
       "id": "fn-format-tour",
       "name": "Fn_FormatTour",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        59040,
-        68208
-      ]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "leftValue": "={{ $json.hasPlaceName }}",
-              "rightValue": false,
-              "operator": {
-                "type": "boolean",
-                "operation": "equals"
-              }
-            }
-          ],
-          "combinator": "or"
-        },
-        "options": {}
-      },
-      "id": "if-placeinfo-no-placename",
-      "name": "IF_PlaceInfo_NoPlaceName",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [
-        58368,
-        68304
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "return {\n  response: '📍 Bạn muốn xem thông tin địa điểm nào?\\n\\nVí dụ:\\n• Đền Thái Vi\\n• Chùa Bái Đính\\n• Lăng Bác Hồ\\n• Hồ Hoàn Kiếm',\n  type: 'clarify_place_name'\n};"
-      },
-      "id": "respond-clarify-placename",
-      "name": "Respond_ClarifyPlaceName",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        61600,
-        68112
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== RESOLVE PLACE NAME =====\n// Mission: Extract place name từ message cho GET_PLACE_INFO\n// Khác với location, placeName không cần geocode\n\nconst data = $json;\nconst msg = data.messageLower || '';\nlet placeName = null;\n\n// Strategy 1: Place type keywords (đền, chùa, lăng...)\nconst placeMatch = msg.match(/(?:đền|chùa|lăng|miếu|hồ|núi|bãi biển|công viên|bảo tàng|di tích|khu)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+giá|\\s+giờ|\\s+thông|\\s+cuối|\\s+hôm|\\s+\\?|$)/i);\nif (placeMatch) {\n  // Get full match and clean\n  placeName = placeMatch[0].replace(/giá|giờ|thông.*$|cuối.*$|hôm.*$|\\?/gi, '').trim();\n}\n\n// Strategy 2: Reversed pattern (\"Thái Vi đền\")\nif (!placeName) {\n  const reversedMatch = msg.match(/([\\wÀ-ỹ]+)\\s+(?:đền|chùa|lăng|miếu)/i);\n  if (reversedMatch) {\n    placeName = reversedMatch[0].trim();\n  }\n}\n\n// Strategy 3: Famous landmarks\nif (!placeName) {\n  const landmarks = ['hồ hoàn kiếm', 'hồ gươm', 'lăng bác', 'chùa một cột', 'chùa bái đính', 'tràng an', 'tam cốc', 'vịnh hạ long', 'động phong nha'];\n  const found = landmarks.find(l => msg.includes(l));\n  if (found) {\n    placeName = found;\n  }\n}\n\n// Strategy 4: Remove noise words and use what's left\nif (!placeName) {\n  const noiseWords = ['thông tin', 'giá vé', 'giờ mở cửa', 'xem', 'cho biết', 'tôi', 'muốn', 'cuối tuần'];\n  let cleaned = msg;\n  for (const noise of noiseWords) {\n    cleaned = cleaned.replace(new RegExp(`\\\\s*${noise}\\\\s*`, 'gi'), ' ');\n  }\n  cleaned = cleaned.trim();\n  if (cleaned.length >= 3) {\n    placeName = cleaned;\n  }\n}\n\nreturn {\n  sessionId: data.sessionId,\n  message: data.message,\n  intent: 'GET_PLACE_INFO',\n  placeName,\n  locationDisplay: placeName\n};"
-      },
-      "id": "fn-resolve-placename",
-      "name": "Fn_ResolvePlaceName",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
         58592,
-        68400
-      ]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "leftValue": "={{ $json.hasLocationHint }}",
-              "rightValue": false,
-              "operator": {
-                "type": "boolean",
-                "operation": "equals"
-              }
-            }
-          ],
-          "combinator": "or"
-        },
-        "options": {}
-      },
-      "id": "2c3deda8-90b2-40d9-8d47-0853896dfa4d",
-      "name": "IF_NeedLocationClarification",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [
-        58368,
-        68400
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "const intent = $json.intent;\nlet question = '';\n\nif (intent === 'SEARCH_POI') {\n  question = '📍 Bạn muốn tìm địa điểm du lịch ở đâu?\\n\\nVí dụ:\\n• Hà Nội\\n• Ninh Bình\\n• Sài Gòn\\n• Đà Nẵng';\n} else if (intent === 'GET_WEATHER') {\n  question = '🌦️ Bạn muốn xem thời tiết ở đâu?\\n\\nVí dụ:\\n• Hà Nội\\n• Ninh Bình\\n• Đà Nẵng';\n} else if (intent === 'SEARCH_HOTEL') {\n  question = '🏚️ Bạn muốn tìm khách sạn ở đâu?\\n\\nVí dụ:\\n• Hà Nội\\n• Ninh Bình\\n• Quận 1 Sài Gòn';\n} else {\n  question = '📍 Bạn có thể cho biết địa điểm cụ thể không?\\n\\nVí dụ: Hà Nội, Ninh Bình, Đà Nẵng...';\n}\n\nreturn {\n  response: question,\n  type: 'clarify_location'\n};"
-      },
-      "id": "4d688a01-03dc-4f31-ba03-3e1873cc3868",
-      "name": "Respond_ClarifyLocation",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        61600,
-        68624
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== EXTRACT LOCATION =====\n// Mission: Extract location từ message\n\nconst message = $json.messageLower || '';\nconst intent = $json.intent;\nlet locationRaw = null;\n\n// Strategy 1: After location keywords\nconst matchAfter = message.match(/(?:ở|tại|gần|quanh|xung quanh)\\s+([^,?.!]+)/i);\nif (matchAfter) {\n  locationRaw = matchAfter[1].trim();\n}\n\n// Strategy 2: Place names (đền, chùa, lăng...)\nif (!locationRaw && intent === 'GET_PLACE_INFO') {\n  const placeMatch = message.match(/(?:đền|chùa|lăng|miếu|hồ|núi|bãi|công viên|bảo tàng)\\s+([\\wÀ-ỹ\\s]+?)(?:\\s+giá|\\s+giờ|\\s+thông|$)/i);\n  if (placeMatch) {\n    locationRaw = placeMatch[0].replace(/giá|giờ|thông.*$/i, '').trim();\n  }\n  \n  // Try reversed pattern: \"Thái Vi đền\"\n  if (!locationRaw) {\n    const reversedMatch = message.match(/([\\wÀ-ỹ]+)\\s+(?:đền|chùa|lăng|miếu)/i);\n    if (reversedMatch) {\n      locationRaw = reversedMatch[0].trim();\n    }\n  }\n}\n\n// Strategy 3: Common city names\nif (!locationRaw) {\n  const cities = ['hà nội', 'hanoi', 'sài gòn', 'saigon', 'hồ chí minh', 'đà nẵng', 'da nang', 'huế', 'hue', 'nha trang', 'phú quốc', 'hội an', 'đà lạt', 'sapa', 'hạ long', 'ninh bình'];\n  const found = cities.find(c => message.includes(c));\n  if (found) {\n    locationRaw = found;\n  }\n}\n\n// Strategy 4: Remove noise words\nif (!locationRaw) {\n  const noiseWords = ['tìm', 'địa điểm', 'du lịch', 'thời tiết', 'khách sạn', 'hotel', 'weather', 'xem', 'tham quan', 'thông tin', 'giá vé', 'giờ mở cửa'];\n  let cleaned = message;\n  for (const noise of noiseWords) {\n    cleaned = cleaned.replace(new RegExp(`\\\\s*${noise}\\\\s*`, 'gi'), ' ');\n  }\n  cleaned = cleaned.trim();\n  if (cleaned.length >= 3) {\n    locationRaw = cleaned;\n  }\n}\n\nreturn {\n  sessionId: $json.sessionId,\n  message: $json.message,\n  intent: $json.intent,\n  location: locationRaw\n};"
-      },
-      "id": "a394e134-30f7-4b83-b444-d5a928b0eb28",
-      "name": "Fn_ExtractLocation",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        58592,
-        68496
-      ]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "string": [
-            {
-              "value1": "={{ $json.location }}",
-              "operation": "isNotEmpty"
-            }
-          ]
-        }
-      },
-      "id": "6b174c18-a629-4546-a47c-3896f3ffdc8f",
-      "name": "IF_LocationValid",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        58816,
-        68496
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "return {\n  response: '❌ Không thể xác định địa điểm.\\n\\nVui lòng cung cấp rõ hơn, ví dụ:\\n- Hà Nội\\n- Đền Thái Vi\\n- Quận 1, Sài Gòn',\n  type: 'error'\n};"
-      },
-      "id": "1607049d-25fe-40d2-8d81-6ae1489fe4e7",
-      "name": "Respond_LocationInvalid",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        61600,
-        68816
-      ]
-    },
-    {
-      "parameters": {
-        "url": "https://geocode.search.hereapi.com/v1/geocode",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "q",
-              "value": "={{ $json.location }}"
-            },
-            {
-              "name": "apiKey",
-              "value": "DyD7QbF6uEeLGB47HYJ-ixnpiuYuS_HNFVaZso01_lQ"
-            },
-            {
-              "name": "lang",
-              "value": "vi-VN"
-            },
-            {
-              "name": "limit",
-              "value": "1"
-            },
-            {
-              "name": "in",
-              "value": "countryCode:VNM"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 8000
-        }
-      },
-      "id": "806ae408-3190-4e59-9a65-dcd8facb0895",
-      "name": "HTTP_Geocode",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        59040,
-        68400
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== PARSE GEOCODING =====\nconst prevData = $('Fn_ExtractLocation').item.json;\nconst geoData = $json;\n\nlet coordinates = null;\nlet displayName = null;\n\nif (geoData.items && geoData.items.length > 0) {\n  const item = geoData.items[0];\n  if (item.position) {\n    const lat = item.position.lat;\n    const lon = item.position.lng;\n    coordinates = `${lat},${lon}`;\n  }\n  displayName = item.title || item.address?.label || prevData.location;\n} else {\n  displayName = prevData.location;\n}\n\nreturn {\n  sessionId: prevData.sessionId,\n  message: prevData.message,\n  intent: prevData.intent,\n  location: prevData.location,\n  locationDisplay: displayName,\n  coordinates\n};"
-      },
-      "id": "0ff38a7e-07e4-4890-afcb-b6139dd74ee5",
-      "name": "Fn_ParseGeocode",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        59264,
-        68400
-      ]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "string": [
-            {
-              "value1": "={{ $json.coordinates }}",
-              "operation": "isNotEmpty"
-            }
-          ]
-        }
-      },
-      "id": "70536312-8e87-4d32-b301-0d8f5413af13",
-      "name": "IF_GeocodeSuccess",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        59488,
-        68400
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "return {\n  response: '❌ Không tìm thấy địa điểm \"' + $json.location + '\".\\n\\nVui lòng thử lại với tên khác hoặc cung cấp thêm thông tin (quận/huyện/thành phố).',\n  type: 'geocode_failed'\n};"
-      },
-      "id": "560a2e50-2aaf-4cdc-9f61-2284cce524a1",
-      "name": "Respond_GeocodeFailed",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        61600,
-        68432
-      ]
-    },
-    {
-      "parameters": {
-        "rules": {
-          "values": [
-            {
-              "conditions": {
-                "options": {
-                  "caseSensitive": true,
-                  "leftValue": "",
-                  "typeValidation": "strict",
-                  "version": 2
-                },
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.intent }}",
-                    "rightValue": "SEARCH_POI",
-                    "operator": {
-                      "type": "string",
-                      "operation": "equals"
-                    }
-                  }
-                ],
-                "combinator": "and"
-              },
-              "renameOutput": true,
-              "outputKey": "POI"
-            },
-            {
-              "conditions": {
-                "options": {
-                  "caseSensitive": true,
-                  "leftValue": "",
-                  "typeValidation": "strict",
-                  "version": 2
-                },
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.intent }}",
-                    "rightValue": "GET_WEATHER",
-                    "operator": {
-                      "type": "string",
-                      "operation": "equals"
-                    }
-                  }
-                ],
-                "combinator": "and"
-              },
-              "renameOutput": true,
-              "outputKey": "Weather"
-            },
-            {
-              "conditions": {
-                "options": {
-                  "caseSensitive": true,
-                  "leftValue": "",
-                  "typeValidation": "strict",
-                  "version": 2
-                },
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.intent }}",
-                    "rightValue": "SEARCH_HOTEL",
-                    "operator": {
-                      "type": "string",
-                      "operation": "equals"
-                    }
-                  }
-                ],
-                "combinator": "and"
-              },
-              "renameOutput": true,
-              "outputKey": "Hotel"
-            },
-            {
-              "conditions": {
-                "options": {
-                  "caseSensitive": true,
-                  "leftValue": "",
-                  "typeValidation": "strict",
-                  "version": 2
-                },
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.intent }}",
-                    "rightValue": "GET_PLACE_INFO",
-                    "operator": {
-                      "type": "string",
-                      "operation": "equals"
-                    }
-                  }
-                ],
-                "combinator": "and"
-              },
-              "renameOutput": true,
-              "outputKey": "PlaceInfo"
-            }
-          ]
-        },
-        "options": {
-          "fallbackOutput": "extra"
-        }
-      },
-      "id": "f8548ae8-94b7-4444-bf78-106ed6fb9af4",
-      "name": "Switch_RouteToAPI",
-      "type": "n8n-nodes-base.switch",
-      "typeVersion": 3.2,
-      "position": [
-        59712,
-        68208
+        67800
       ]
     },
     {
@@ -851,20 +947,141 @@
           "timeout": 15000
         }
       },
-      "id": "e8527309-6d6e-408d-af81-ba96205b257f",
+      "id": "http-search-poi",
       "name": "HTTP_SearchPOI",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        59936,
-        67904
+        60384,
+        68200
       ],
       "credentials": {
         "serpApi": {
           "id": "vD3y3KChuLVK1OPF",
           "name": "SerpAPI account 2"
         }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT POI =====\nconst geocodeData = $('Switch_RouteToAPI').item.json;\nconst results = $json.organic_results || [];\n\nconst poi_raw = results.slice(0, 5).map(p => ({\n  name: p.title || 'N/A',\n  source: p.link || null,\n  short_fact: p.snippet || null\n}));\n\nconsole.log('[Fn_FormatPOI] POIs found:', poi_raw.length, '| Location:', geocodeData.locationDisplay);\n\nreturn {\n  intent: 'SEARCH_POI',\n  poi_raw,\n  location: geocodeData.locationDisplay || 'unknown',\n  source: geocodeData.source || 'unknown',\n  has_results: poi_raw.length > 0\n};"
+      },
+      "id": "fn-format-poi",
+      "name": "Fn_FormatPOI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60608,
+        68200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== NORMALIZE WEATHER TIME =====\nconst data = $json;\n\nlet timeText;\ntry { timeText = $('Fn_ExtractLocation').item.json.detectedTime; } catch(e) { timeText = null; }\nconst text = (timeText || data.message || '').toLowerCase();\n\nlet weatherMode = 'current';\nlet forecastDays = 0;\nlet timeDescription = 'hiện tại';\n\nif (/ngày mai|tomorrow/.test(text)) {\n  weatherMode = 'forecast'; forecastDays = 2; timeDescription = 'ngày mai';\n} else if (/cuối tuần|weekend/.test(text)) {\n  weatherMode = 'forecast'; forecastDays = 7; timeDescription = 'cuối tuần';\n} else if (/\\d+\\s*(ngày|day)/.test(text)) {\n  const match = text.match(/(\\d+)\\s*(ngày|day)/);\n  if (match) { forecastDays = Math.min(parseInt(match[1]), 14); weatherMode = 'forecast'; timeDescription = forecastDays + ' ngày tới'; }\n} else if (/tuần này|tuần tới/.test(text)) {\n  weatherMode = 'forecast'; forecastDays = 7; timeDescription = 'tuần này';\n}\n\nconst _coords = (data.coordinates || '').split(',');\nconst _rlat = _coords[0] ? Math.round(parseFloat(_coords[0]) * 1000) / 1000 : 0;\nconst _rlng = _coords[1] ? Math.round(parseFloat(_coords[1]) * 1000) / 1000 : 0;\nconst weatherCacheKey = 'weather_' + _rlat + '_' + _rlng + '_' + weatherMode + '_' + forecastDays;\n\nconsole.log('[Fn_NormalizeWeatherTime] Mode:', weatherMode, '| Days:', forecastDays, '| CacheKey:', weatherCacheKey);\n\nreturn { ...data, weatherMode, forecastDays, timeDescription, weatherCacheKey };"
+      },
+      "id": "fn-normalize-weather-time",
+      "name": "Fn_NormalizeWeatherTime",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60384,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT response_data FROM weather_cache WHERE cache_key = '{{ $json.weatherCacheKey }}' AND expires_at > NOW() LIMIT 1;"
+      },
+      "id": "db-check-weather-cache",
+      "name": "DB_CheckWeatherCache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        60608,
+        68400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== WEATHER CACHE GUARD =====\nconst items = $input.all();\nconst prevData = $('Fn_NormalizeWeatherTime').item.json;\n\nif (items.length > 0 && items[0].json && items[0].json.response_data) {\n  const cached = typeof items[0].json.response_data === 'string'\n    ? JSON.parse(items[0].json.response_data) : items[0].json.response_data;\n  console.log('[WeatherCacheGuard] CACHE HIT for key:', prevData.weatherCacheKey);\n  return [{ json: { ...cached, weatherMode: 'cache_hit', _cacheHit: true } }];\n} else {\n  console.log('[WeatherCacheGuard] CACHE MISS for key:', prevData.weatherCacheKey);\n  return [{ json: { ...prevData, _cacheHit: false } }];\n}"
+      },
+      "id": "fn-weather-cache-guard",
+      "name": "Fn_WeatherCacheGuard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60832,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.weatherMode }}",
+                    "rightValue": "cache_hit",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "CacheHit"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.weatherMode }}",
+                    "rightValue": "forecast",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Forecast"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "switch-weather-mode",
+      "name": "Switch_WeatherMode",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        61056,
+        68400
+      ]
     },
     {
       "parameters": {
@@ -874,11 +1091,11 @@
           "parameters": [
             {
               "name": "key",
-              "value": "52c2f536877444ec8a0165526260501"
+              "value": "={{ $env.WEATHER_API_KEY || '52c2f536877444ec8a0165526260501' }}"
             },
             {
               "name": "q",
-              "value": "={{ $json.coordinates || $json.location }}"
+              "value": "={{ $json.coordinates }}"
             },
             {
               "name": "lang",
@@ -894,14 +1111,104 @@
           "timeout": 10000
         }
       },
-      "id": "cba5b795-a0ab-4259-a4af-ccafb8ee1caf",
+      "id": "http-get-weather",
       "name": "HTTP_GetWeather",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        59936,
-        68096
+        61280,
+        68500
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://api.weatherapi.com/v1/forecast.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "={{ $env.WEATHER_API_KEY || '52c2f536877444ec8a0165526260501' }}"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.coordinates }}"
+            },
+            {
+              "name": "days",
+              "value": "={{ $json.forecastDays || 3 }}"
+            },
+            {
+              "name": "lang",
+              "value": "vi"
+            },
+            {
+              "name": "aqi",
+              "value": "yes"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "http-get-weather-forecast",
+      "name": "HTTP_GetWeatherForecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        61280,
+        68300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT WEATHER =====\nconst geocodeData = $('Switch_RouteToAPI').item.json;\nconst extractData = $('Fn_ExtractLocation').item.json;\nconst current = $json.current;\nconst apiLocation = $json.location;\n\nif (!current) {\n  console.log('[Fn_FormatWeather] WARN: No current weather data');\n  return { intent: 'GET_WEATHER', weather_raw: null, location: extractData.location, has_results: false };\n}\n\nlet airQuality = null;\nif (current.air_quality) {\n  const aqi = current.air_quality;\n  const epaIndex = aqi['us-epa-index'];\n  const epaLabels = { 1: 'Tốt', 2: 'Trung bình', 3: 'Không tốt cho nhóm nhạy cảm', 4: 'Không tốt', 5: 'Rất không tốt', 6: 'Nguy hại' };\n  airQuality = {\n    pm2_5: Math.round(aqi.pm2_5 * 10) / 10,\n    pm10: Math.round(aqi.pm10 * 10) / 10,\n    us_epa_index: epaIndex,\n    label: epaLabels[epaIndex] || 'Không rõ'\n  };\n}\n\nconsole.log('[Fn_FormatWeather] Temp:', current.temp_c, '| Condition:', current.condition?.text);\n\nreturn {\n  intent: 'GET_WEATHER',\n  weather_raw: {\n    temp_c: current.temp_c,\n    feelslike_c: current.feelslike_c,\n    condition: current.condition?.text || '',\n    humidity: current.humidity || 0,\n    wind_kph: current.wind_kph || 0,\n    wind_dir: current.wind_dir || '',\n    precip_mm: current.precip_mm || 0,\n    uv: current.uv,\n    vis_km: current.vis_km || 0,\n    cloud: current.cloud || 0,\n    is_day: !!current.is_day,\n    air_quality: airQuality\n  },\n  location: geocodeData.locationDisplay || extractData.location,\n  localtime: apiLocation?.localtime || null,\n  last_updated: current.last_updated || null,\n  source: geocodeData.source || 'unknown',\n  has_results: true\n};"
+      },
+      "id": "fn-format-weather",
+      "name": "Fn_FormatWeather",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61504,
+        68500
       ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== FORMAT WEATHER FORECAST =====\nconst geocodeData = $('Switch_RouteToAPI').item.json;\nconst normalizeData = $('Fn_NormalizeWeatherTime').item.json;\nconst extractData = $('Fn_ExtractLocation').item.json;\nconst forecast = $json.forecast?.forecastday || [];\nconst currentData = $json.current;\n\nconst forecast_raw = forecast.map(day => ({\n  date: day.date,\n  maxtemp_c: day.day.maxtemp_c,\n  mintemp_c: day.day.mintemp_c,\n  avgtemp_c: day.day.avgtemp_c,\n  condition: day.day.condition?.text || '',\n  chance_of_rain: day.day.daily_chance_of_rain || 0,\n  totalprecip_mm: day.day.totalprecip_mm || 0,\n  maxwind_kph: day.day.maxwind_kph || 0,\n  avghumidity: day.day.avghumidity || 0,\n  uv: day.day.uv\n}));\n\nlet current_snapshot = null;\nif (currentData) {\n  current_snapshot = {\n    temp_c: currentData.temp_c,\n    condition: currentData.condition?.text || '',\n    humidity: currentData.humidity || 0\n  };\n}\n\nconsole.log('[Fn_FormatWeatherForecast] Days:', forecast_raw.length, '| Location:', geocodeData.locationDisplay);\n\nreturn {\n  intent: 'GET_WEATHER',\n  forecast_raw,\n  current_snapshot,\n  location: geocodeData.locationDisplay || extractData.location,\n  timeDescription: normalizeData.timeDescription,\n  source: geocodeData.source || 'unknown',\n  has_results: forecast_raw.length > 0,\n  isForecast: true\n};"
+      },
+      "id": "fn-format-weather-forecast",
+      "name": "Fn_FormatWeatherForecast",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61504,
+        68300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO weather_cache (cache_key, response_data, expires_at) VALUES ('{{ $('Fn_NormalizeWeatherTime').item.json.weatherCacheKey }}', '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb, NOW() + INTERVAL '15 minutes') ON CONFLICT (cache_key) DO UPDATE SET response_data = EXCLUDED.response_data, expires_at = EXCLUDED.expires_at;"
+      },
+      "id": "db-write-weather-cache",
+      "name": "DB_WriteWeatherCache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        61728,
+        68700
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
+      }
     },
     {
       "parameters": {
@@ -937,175 +1244,331 @@
           "timeout": 15000
         }
       },
-      "id": "6110ff85-c776-413d-a9a5-262e39153206",
+      "id": "http-search-hotel",
       "name": "HTTP_SearchHotel",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        59936,
-        68288
+        60384,
+        68600
       ],
       "credentials": {
         "serpApi": {
           "id": "vD3y3KChuLVK1OPF",
           "name": "SerpAPI account 2"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "url": "https://serpapi.com/search",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "serpApi",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "engine",
-              "value": "google"
-            },
-            {
-              "name": "q",
-              "value": "={{ $json.locationDisplay }} giá vé giờ mở cửa thông tin"
-            },
-            {
-              "name": "hl",
-              "value": "vi"
-            },
-            {
-              "name": "gl",
-              "value": "vn"
-            },
-            {
-              "name": "num",
-              "value": "5"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 15000
-        }
+        "jsCode": "// ===== FORMAT HOTEL (Enhanced: added address field) =====\nconst geocodeData = $('Switch_RouteToAPI').item.json;\nconst hotels = $json.properties || [];\n\nconst hotels_raw = hotels.slice(0, 5).map(h => ({\n  name: h.name || 'N/A',\n  price: h.rate_per_night?.lowest || null,\n  rating: h.overall_rating || null,\n  description: h.description || null,\n  address: h.address || h.neighborhood || null\n}));\n\nconsole.log('[Fn_FormatHotel] Hotels found:', hotels_raw.length, '| Location:', geocodeData.locationDisplay);\n\nreturn {\n  intent: 'SEARCH_HOTEL',\n  hotels_raw,\n  location: geocodeData.locationDisplay || 'unknown',\n  source: geocodeData.source || 'unknown',\n  has_results: hotels_raw.length > 0\n};"
       },
-      "id": "http-search-place-info",
-      "name": "HTTP_SearchPlaceInfo",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        59936,
-        68480
-      ],
-      "credentials": {
-        "serpApi": {
-          "id": "vD3y3KChuLVK1OPF",
-          "name": "SerpAPI account 2"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== FORMAT POI RESULTS (AGODA-STYLE) =====\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy - dùng data từ Fn_ParseGeocode\nconst geocodeData = $('Fn_ParseGeocode').item.json;\nconst apiData = $json;\n\nconst results = apiData.organic_results || [];\n\nif (results.length === 0) {\n  return {\n    intent: 'SEARCH_POI',\n    poi_raw: [],\n    location: geocodeData.locationDisplay,\n    has_results: false\n  };\n}\n\nconst poi_raw = results.slice(0, 5).map(p => ({\n  name: p.title || 'N/A',\n  source: p.link || null,\n  short_fact: p.snippet || null\n}));\n\nreturn {\n  intent: 'SEARCH_POI',\n  poi_raw,\n  location: geocodeData.locationDisplay,\n  has_results: true\n};"
-      },
-      "id": "bd6b8407-7cd8-4982-84cc-ce2a87573e1e",
-      "name": "Fn_FormatPOI",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        60160,
-        67904
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== FORMAT WEATHER RESULTS (AGODA-STYLE) =====\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy\nconst geocodeData = $('Fn_ParseGeocode').item.json;\nconst apiData = $json;\n\nif (!apiData.current) {\n  return {\n    intent: 'GET_WEATHER',\n    weather_raw: null,\n    location: geocodeData.locationDisplay,\n    has_results: false\n  };\n}\n\nconst current = apiData.current;\n\nconst weather_raw = {\n  temp_c: current.temp_c,\n  feelslike_c: current.feelslike_c,\n  condition: current.condition?.text || '',\n  humidity: current.humidity || 0,\n  wind_kph: current.wind_kph || 0,\n  last_updated: current.last_updated || ''\n};\n\nreturn {\n  intent: 'GET_WEATHER',\n  weather_raw,\n  location: geocodeData.locationDisplay,\n  has_results: true\n};"
-      },
-      "id": "83122bb9-7642-43d0-ac79-2f4e8af4b9d1",
-      "name": "Fn_FormatWeather",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        60160,
-        68096
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// ===== FORMAT HOTEL RESULTS (AGODA-STYLE) =====\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy\nconst geocodeData = $('Fn_ParseGeocode').item.json;\nconst apiData = $json;\n\nconst hotels = apiData.properties || [];\n\nif (hotels.length === 0) {\n  return {\n    intent: 'SEARCH_HOTEL',\n    hotels_raw: [],\n    location: geocodeData.locationDisplay,\n    has_results: false\n  };\n}\n\nconst hotels_raw = hotels.slice(0, 5).map(h => ({\n  name: h.name || 'N/A',\n  price: h.rate_per_night?.lowest || null,\n  rating: h.overall_rating || null,\n  description: h.description || null\n}));\n\nreturn {\n  intent: 'SEARCH_HOTEL',\n  hotels_raw,\n  location: geocodeData.locationDisplay,\n  has_results: true\n};"
-      },
-      "id": "9d281c1c-5090-4fcc-9260-d88cc269b7ae",
+      "id": "fn-format-hotel",
       "name": "Fn_FormatHotel",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        60160,
-        68288
+        60608,
+        68600
       ]
     },
     {
       "parameters": {
-        "jsCode": "// ===== FORMAT PLACE INFO RESULTS (AGODA-STYLE) =====\n// Mission: Extract giá vé, giờ mở cửa từ search results\n// ⚡ FIX: KHÔNG đọc Switch chưa chạy - dùng data từ Fn_ResolvePlaceName\n\nconst placeData = $('Fn_ResolvePlaceName').item.json;\nconst apiData = $json;\n\nconst results = apiData.organic_results || [];\nconst knowledgeGraph = apiData.knowledge_graph || {};\n\n// Structured place info\nconst place_info = {\n  name: placeData.placeName || placeData.locationDisplay,\n  description: null,\n  ticket_price: null,\n  opening_hours: null,\n  address: null,\n  note_if_unknown: null\n};\n\n// Try knowledge graph first\nif (knowledgeGraph.title) {\n  place_info.description = knowledgeGraph.description || null;\n  place_info.address = knowledgeGraph.address || null;\n  // Opening hours from KG\n  if (knowledgeGraph.hours) {\n    place_info.opening_hours = typeof knowledgeGraph.hours === 'string' \n      ? knowledgeGraph.hours \n      : JSON.stringify(knowledgeGraph.hours);\n  }\n}\n\n// Extract from snippets\nfor (const r of results) {\n  const snippet = (r.snippet || '').toLowerCase();\n  \n  // Look for ticket price\n  const priceMatch = snippet.match(/(\\d+[.,]?\\d*)\\s*(đ|vnđ|đồng|k|nghìn|triệu)/i);\n  if (priceMatch && !place_info.ticket_price) {\n    place_info.ticket_price = priceMatch[0];\n  }\n  \n  // Look for opening hours\n  const hoursMatch = snippet.match(/(\\d{1,2}[h:]\\d{0,2}\\s*-\\s*\\d{1,2}[h:]\\d{0,2}|mở cửa[^.]+)/i);\n  if (hoursMatch && !place_info.opening_hours) {\n    place_info.opening_hours = hoursMatch[0];\n  }\n  \n  // Get description if not set\n  if (!place_info.description && r.snippet && r.snippet.length > 50) {\n    place_info.description = r.snippet;\n  }\n}\n\n// Add commercial note if missing critical info\nif (!place_info.ticket_price) {\n  place_info.note_if_unknown = 'Hiện chưa có thông tin giá vé chính thức, bạn nên liên hệ địa phương để biết thêm chi tiết.';\n}\nif (!place_info.opening_hours) {\n  place_info.note_if_unknown = (place_info.note_if_unknown || '') + ' Thông tin giờ mở cửa chưa được cập nhật.';\n}\n\nreturn {\n  intent: 'GET_PLACE_INFO',\n  place_info,\n  location: placeData.placeName || placeData.locationDisplay,\n  has_results: !!(place_info.description || place_info.ticket_price || place_info.opening_hours)\n};"
+        "jsCode": "// ===== EXTRACT DISTANCE ENTITIES (Enhanced: DB-first alias normalization) =====\n// WHY: Normalize aliases for DB lookup before geocoding\n// OUTPUT: origin/dest text + normalized aliases for DB query\n\nconst msg = $json.messageLower || '';\nconst data = $json;\n\nlet origin = null;\nlet destination = null;\n\n// Strategy 1: \"từ A đến/tới B\"\nconst pattern1 = msg.match(/từ\\s+(.+?)\\s+(?:đến|tới|sang)\\s+(.+?)(?:\\s+(?:là|bao|mất|khoảng|cách)|[?.!]|$)/i);\nif (pattern1) {\n  origin = pattern1[1].trim();\n  destination = pattern1[2].trim();\n}\n\n// Strategy 2: \"A cách B\"\nif (!origin) {\n  const pattern2 = msg.match(/(.+?)\\s+cách\\s+(.+?)\\s+(?:bao|mấy|bao xa|bao lâu)/i);\n  if (pattern2) {\n    origin = pattern2[1].trim();\n    destination = pattern2[2].trim();\n  }\n}\n\nconst cleanup = (text) => {\n  if (!text) return null;\n  return text\n    .replace(/^(thành phố|tp|tỉnh|huyện|quận)\\s+/i, '')\n    .replace(/\\s+(là|bao|mất|không|nhỉ|vậy|thế|nào).*$/i, '')\n    .replace(/[?.!,]+$/, '')\n    .trim() || null;\n};\n\norigin = cleanup(origin);\ndestination = cleanup(destination);\n\n// Normalize aliases for DB lookup (same algorithm as Fn_NormalizeAlias)\nfunction normalizeAlias(text) {\n  if (!text) return null;\n  return text\n    .replace(/\\s+/g, ' ').trim()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/đ/g, 'd').replace(/Đ/g, 'D')\n    .replace(/[.,!?;:'\\\"()\\[\\]{}]/g, '')\n    .replace(/\\s+/g, '_')\n    .replace(/_+/g, '_')\n    .replace(/^_|_$/g, '')\n    .toLowerCase() || null;\n}\n\nconst originAlias = normalizeAlias(origin);\nconst destAlias = normalizeAlias(destination);\n\nconsole.log('[ExtractDistanceEntities] Origin:', origin, '(' + originAlias + ') | Dest:', destination, '(' + destAlias + ')');\n\nreturn {\n  ...data,\n  distanceOrigin: origin,\n  distanceDestination: destination,\n  originAlias,\n  destAlias,\n  hasOrigin: !!origin,\n  hasDestination: !!destination\n};"
       },
-      "id": "fn-format-place-info",
-      "name": "Fn_FormatPlaceInfo",
+      "id": "fn-extract-distance-entities",
+      "name": "Fn_ExtractDistanceEntities",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        60160,
-        68480
+        58144,
+        67600
       ]
     },
     {
       "parameters": {
-        "jsCode": "// ===== BUILD COMPLETE REQUEST BODY =====\n// Mission: Tạo TOÀN BỘ request body cho OpenRouter\n// ⚡ UPDATED: Hỗ trợ 6 intents\n\nconst data = $json;\n\nconst intent = data.intent || 'UNKNOWN';\nconst location = data.location || null;\nconst has_results = data.has_results !== false;\n\n// Chuẩn hóa data theo intent\nlet structured_data = null;\n\nif (intent === 'SEARCH_POI') {\n  structured_data = {\n    places: data.poi_raw || [],\n    count: (data.poi_raw || []).length\n  };\n} else if (intent === 'GET_WEATHER') {\n  structured_data = {\n    weather: data.weather_raw || null\n  };\n} else if (intent === 'SEARCH_HOTEL') {\n  structured_data = {\n    hotels: data.hotels_raw || [],\n    count: (data.hotels_raw || []).length\n  };\n} else if (intent === 'GET_PLACE_INFO') {\n  structured_data = {\n    place_info: data.place_info || null\n  };\n} else if (intent === 'SEARCH_NEARBY') {\n  structured_data = {\n    nearby_places: data.nearby_raw || [],\n    count: (data.nearby_raw || []).length,\n    poi_type: data.poiType || 'địa điểm'\n  };\n} else if (intent === 'SEARCH_TOUR') {\n  structured_data = {\n    tours: data.tours_raw || [],\n    count: (data.tours_raw || []).length,\n    duration: data.duration || null\n  };\n}\n\nconst ai_input = {\n  intent,\n  location,\n  has_results,\n  data: structured_data\n};\n\nconst systemPrompt = `VAI TRÒ\nBạn là module VIẾT LẠI KẾT QUẢ cho chatbot du lịch thương mại.\nBạn KHÔNG phải công cụ tìm kiếm, KHÔNG phải AI sáng tác.\n\nMỤC TIÊU\n- Đáng tin\n- Không nói sai\n- Không gây rối\n- Giống cách nhân viên tư vấn du lịch viết\n\nNGUYÊN TẮC BẮT BUỘC\n1. CHỈ sử dụng dữ liệu được cung cấp trong đầu vào.\n2. KHÔNG bịa thêm địa điểm, thông tin, hoặc chi tiết.\n3. KHÔNG suy diễn vượt quá dữ liệu.\n4. Nếu dữ liệu chỉ mang tính tổng quan → nói rõ là \"thông tin tổng quan\".\n5. Nếu địa danh trong input không rõ ràng → diễn đạt trung tính, không khẳng định sai.\n6. Nếu có note_if_unknown → BẮT BUỘC đưa vào response.\n\nQUY TẮC VIẾT NỘI DUNG\n- ĐƯỢC tóm tắt và diễn đạt lại từ nội dung nguồn.\n- KHÔNG sao chép nguyên văn tiêu đề, snippet, hoặc mô tả SEO.\n- Mỗi địa điểm: 2–3 câu ngắn, trung tính.\n- Tránh từ ngữ quảng cáo, tránh văn phong AI.\n- TUYỆT ĐỐI KHÔNG dùng dấu \"...\".\n\nĐẶC BIỆT CHO GET_PLACE_INFO\n- Nếu có giá vé: ghi rõ\n- Nếu có giờ mở cửa: ghi rõ\n- Nếu KHÔNG có: nói \"Hiện chưa có thông tin chính thức, vui lòng liên hệ địa phương\"\n\nĐẶC BIỆT CHO SEARCH_NEARBY\n- Liệt kê theo thứ tự gần nhất\n- Nếu có distance: ghi khoảng cách\n- Nếu có rating: ghi đánh giá\n\nĐẶC BIỆT CHO SEARCH_TOUR\n- Nêu tên tour và nguồn\n- KHÔNG tự lập lịch trình\n- Khuyến nghị: \"Bạn có thể liên hệ các đơn vị trên để biết thêm chi tiết\"\n\nTRÌNH BÀY\n- Danh sách rõ ràng\n- Tên địa điểm in đậm\n- Cuối câu trả lời: hỏi tiếp 1 câu định hướng nhẹ\n\nCHỈ TRẢ VỀ JSON HỢP LỆ. KHÔNG thêm chữ giải thích. KHÔNG markdown.\n{\n  \"response\": \"Nội dung phản hồi cho người dùng\",\n  \"type\": \"success\"\n}`;\n\nconst requestBody = {\n  model: 'openai/gpt-4o-mini',\n  temperature: 0.3,\n  max_tokens: 600,\n  messages: [\n    {\n      role: 'system',\n      content: systemPrompt\n    },\n    {\n      role: 'user',\n      content: 'Dữ liệu:\\n' + JSON.stringify(ai_input, null, 2)\n    }\n  ]\n};\n\nreturn { requestBody };"
+        "operation": "executeQuery",
+        "query": "=SELECT canonical_name, lat, lng, aliases::text, place_type, admin_level FROM poi_override WHERE status = 'active' AND intent_support ? 'GET_DISTANCE' AND (aliases ? '{{ $json.originAlias }}' OR aliases ? '{{ $json.destAlias }}') ORDER BY admin_level DESC, priority DESC;"
       },
-      "id": "81319b58-db1e-4c99-b48b-945095e276eb",
-      "name": "Fn_BuildAIInput",
+      "id": "db-distance-poi-lookup",
+      "name": "DB_DistancePOILookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        58368,
+        67600
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== RESOLVE DISTANCE COORDS FROM DB =====\n// WHY: Use DB coords when available, skip geocode API for known places\n// INPUT: DB rows matching origin/dest aliases + extracted distance entities\n// OUTPUT: Coords for origin/dest (from DB or flagged for geocode)\n\nconst items = $input.all();\nconst prevData = $('Fn_ExtractDistanceEntities').item.json;\n\nconst originAlias = prevData.originAlias;\nconst destAlias = prevData.destAlias;\n\nlet originLat = null, originLng = null, originName = null, originSource = null;\nlet destLat = null, destLng = null, destName = null, destSource = null;\n\n// Process DB results - match aliases to origin/dest\nfor (const item of items) {\n  const row = item.json;\n  if (!row || !row.canonical_name) continue;\n\n  // Parse aliases text back to check membership\n  let aliasArr = [];\n  try {\n    aliasArr = typeof row.aliases === 'string' ? JSON.parse(row.aliases) : (row.aliases || []);\n  } catch(e) { continue; }\n\n  const matchesOrigin = originAlias && aliasArr.includes(originAlias);\n  const matchesDest = destAlias && aliasArr.includes(destAlias);\n\n  if (matchesOrigin && !originLat) {\n    originLat = parseFloat(row.lat);\n    originLng = parseFloat(row.lng);\n    originName = row.canonical_name;\n    originSource = 'poi_override_db';\n    console.log('[ResolveDistanceCoords] Origin DB HIT:', originName);\n  }\n\n  if (matchesDest && !destLat) {\n    destLat = parseFloat(row.lat);\n    destLng = parseFloat(row.lng);\n    destName = row.canonical_name;\n    destSource = 'poi_override_db';\n    console.log('[ResolveDistanceCoords] Dest DB HIT:', destName);\n  }\n}\n\nconst allCoordsResolved = !!(originLat && originLng && destLat && destLng);\nconst needGeocode = !allCoordsResolved;\n\nconsole.log('[ResolveDistanceCoords] AllResolved:', allCoordsResolved, '| NeedGeocode:', needGeocode);\n\nreturn [{ json: {\n  ...prevData,\n  originLat, originLng, originName: originName || prevData.distanceOrigin, originSource,\n  destLat, destLng, destName: destName || prevData.distanceDestination, destSource,\n  allCoordsResolved,\n  needGeocode\n}}];"
+      },
+      "id": "fn-resolve-distance-coords",
+      "name": "Fn_ResolveDistanceCoords",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        60384,
-        68192
+        58592,
+        67600
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.allCoordsResolved === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-all-coords-resolved",
+      "name": "IF_AllCoordsResolved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        58816,
+        67600
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://geocode.search.hereapi.com/v1/geocode",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.distanceOrigin }}"
+            },
+            {
+              "name": "apiKey",
+              "value": "={{ $env.HERE_API_KEY || 'DyD7QbF6uEeLGB47HYJ-ixnpiuYuS_HNFVaZso01_lQ' }}"
+            },
+            {
+              "name": "lang",
+              "value": "vi-VN"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            },
+            {
+              "name": "in",
+              "value": "countryCode:VNM"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "http-geocode-origin",
+      "name": "HTTP_GeocodeOrigin",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59040,
+        67400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://geocode.search.hereapi.com/v1/geocode",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $('Fn_ResolveDistanceCoords').item.json.distanceDestination }}"
+            },
+            {
+              "name": "apiKey",
+              "value": "={{ $env.HERE_API_KEY || 'DyD7QbF6uEeLGB47HYJ-ixnpiuYuS_HNFVaZso01_lQ' }}"
+            },
+            {
+              "name": "lang",
+              "value": "vi-VN"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            },
+            {
+              "name": "in",
+              "value": "countryCode:VNM"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "http-geocode-destination",
+      "name": "HTTP_GeocodeDestination",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        59264,
+        67400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== BUILD DISTANCE ORS REQUEST (MERGED with PrepareDestGeocode) =====\n// WHY: Handles BOTH paths - DB-direct and geocode fallback\n// INPUT: Either from IF_AllCoordsResolved (true) or HTTP_GeocodeDestination\n// OUTPUT: ORS request body + validated coords + distance cache key\n\nconst resolveData = $('Fn_ResolveDistanceCoords').item.json;\n\nlet originLat, originLng, originName;\nlet destLat, destLng, destName;\n\nif (resolveData.allCoordsResolved) {\n  // === DB-DIRECT PATH: All coords from poi_override ===\n  originLat = resolveData.originLat;\n  originLng = resolveData.originLng;\n  originName = resolveData.originName;\n  destLat = resolveData.destLat;\n  destLng = resolveData.destLng;\n  destName = resolveData.destName;\n  console.log('[BuildDistanceORS] DB-direct path:', originName, '→', destName);\n} else {\n  // === GEOCODE PATH: Parse geocode API responses ===\n  // Use DB coords if partially resolved, otherwise parse geocode\n  if (resolveData.originLat && resolveData.originLng) {\n    originLat = resolveData.originLat;\n    originLng = resolveData.originLng;\n    originName = resolveData.originName;\n  } else {\n    try {\n      const origGeo = $('HTTP_GeocodeOrigin').item.json;\n      if (origGeo.items && origGeo.items[0]?.position) {\n        originLat = origGeo.items[0].position.lat;\n        originLng = origGeo.items[0].position.lng;\n        originName = origGeo.items[0].title || resolveData.distanceOrigin;\n      }\n    } catch(e) { console.log('[BuildDistanceORS] Origin geocode parse failed:', e.message); }\n  }\n\n  if (resolveData.destLat && resolveData.destLng) {\n    destLat = resolveData.destLat;\n    destLng = resolveData.destLng;\n    destName = resolveData.destName;\n  } else {\n    try {\n      const destGeo = $json; // Current input from HTTP_GeocodeDestination\n      if (destGeo.items && destGeo.items[0]?.position) {\n        destLat = destGeo.items[0].position.lat;\n        destLng = destGeo.items[0].position.lng;\n        destName = destGeo.items[0].title || resolveData.distanceDestination;\n      }\n    } catch(e) { console.log('[BuildDistanceORS] Dest geocode parse failed:', e.message); }\n  }\n  console.log('[BuildDistanceORS] Geocode path:', originName, '→', destName);\n}\n\n// Validate both coords\nconst originOK = !!(originLat && originLng);\nconst destOK = !!(destLat && destLng);\n\nif (!originOK || !destOK) {\n  const missing = [];\n  if (!originOK) missing.push(resolveData.distanceOrigin || 'điểm đi');\n  if (!destOK) missing.push(resolveData.distanceDestination || 'điểm đến');\n  console.log('[BuildDistanceORS] FAIL: Missing coords for', missing.join(', '));\n  return {\n    ...resolveData,\n    originLat, originLng, originName,\n    destLat, destLng, destName,\n    geocodeFailed: true,\n    failedLocations: missing,\n    orsRequestBody: null,\n    distanceCacheKey: null\n  };\n}\n\n// CRITICAL: ORS uses [lng, lat]\nconst orsRequestBody = {\n  locations: [\n    [originLng, originLat],\n    [destLng, destLat]\n  ],\n  sources: [0],\n  destinations: [1],\n  metrics: ['distance', 'duration'],\n  units: 'm'\n};\n\n// Build cache key (rounded coords for de-duplication)\nconst _roLat = Math.round(originLat * 1000) / 1000;\nconst _roLng = Math.round(originLng * 1000) / 1000;\nconst _rdLat = Math.round(destLat * 1000) / 1000;\nconst _rdLng = Math.round(destLng * 1000) / 1000;\nconst distanceCacheKey = 'dist_' + _roLat + '_' + _roLng + '_' + _rdLat + '_' + _rdLng;\n\nconsole.log('[BuildDistanceORS] CacheKey:', distanceCacheKey);\n\nreturn {\n  ...resolveData,\n  originLat, originLng, originName,\n  destLat, destLng, destName,\n  geocodeFailed: false,\n  orsRequestBody,\n  distanceCacheKey\n};"
+      },
+      "id": "fn-build-distance-ors",
+      "name": "Fn_BuildDistanceORS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59488,
+        67600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT response_data FROM distance_cache WHERE cache_key = '{{ $json.distanceCacheKey }}' AND expires_at > NOW() LIMIT 1;"
+      },
+      "id": "db-check-distance-cache",
+      "name": "DB_CheckDistanceCache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        59712,
+        67600
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== DISTANCE CACHE GUARD =====\nconst items = $input.all();\nconst prevData = $('Fn_BuildDistanceORS').item.json;\n\nif (prevData.geocodeFailed) {\n  console.log('[DistanceCacheGuard] Geocode failed, skip cache');\n  return [{ json: { ...prevData, distanceCacheHit: false } }];\n}\n\nif (items.length > 0 && items[0].json && items[0].json.response_data) {\n  const cached = typeof items[0].json.response_data === 'string'\n    ? JSON.parse(items[0].json.response_data) : items[0].json.response_data;\n  console.log('[DistanceCacheGuard] CACHE HIT');\n  return [{ json: { ...cached, distanceCacheHit: true } }];\n} else {\n  console.log('[DistanceCacheGuard] CACHE MISS');\n  return [{ json: { ...prevData, distanceCacheHit: false } }];\n}"
+      },
+      "id": "fn-distance-cache-guard",
+      "name": "Fn_DistanceCacheGuard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        59936,
+        67600
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.distanceCacheHit === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-distance-cache-hit",
+      "name": "IF_DistanceCacheHit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        60160,
+        67600
       ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "url": "https://api.openrouteservice.org/v2/matrix/driving-car",
         "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "httpBearerAuth",
+        "nodeCredentialType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ $json.requestBody }}",
+        "jsonBody": "={{ JSON.stringify($json.orsRequestBody) }}",
         "options": {
-          "timeout": 15000
+          "timeout": 5000
         }
       },
-      "id": "f23f27eb-999a-4639-8f22-e314a3615a9e",
-      "name": "AI_Response_Guard",
+      "id": "http-ors-distance-calc",
+      "name": "HTTP_ORS_DistanceCalc",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        60608,
-        68192
+        60384,
+        67400
       ],
+      "onError": "continueRegularOutput",
       "credentials": {
-        "httpBearerAuth": {
-          "id": "SVjS2GRy7ezqnu9w",
-          "name": "Bearer Auth account 2"
+        "httpHeaderAuth": {
+          "id": "YOUR_ORS_CREDENTIAL_ID",
+          "name": "ORS API Key"
         }
       }
     },
     {
       "parameters": {
-        "jsCode": "// ===== PARSE AI GUARD RESPONSE =====\nconst content = ($json.choices?.[0]?.message?.content || '{}').trim();\nlet parsed = {};\ntry {\n  parsed = JSON.parse(content);\n} catch(e) {\n  parsed = {\n    response: 'Đã xảy ra lỗi khi xử lý kết quả. Vui lòng thử lại.',\n    type: 'error'\n  };\n}\n\nreturn parsed;"
+        "jsCode": "// ===== FORMAT DISTANCE RESULT =====\nconst prevData = $('Fn_BuildDistanceORS').item.json;\nconst orsResponse = $json;\n\n// Check geocode failure\nif (prevData.geocodeFailed) {\n  const failed = prevData.failedLocations || [];\n  console.log('[FormatDistance] FAIL: Geocode failed for', failed.join(', '));\n  return {\n    intent: 'GET_DISTANCE',\n    has_results: false,\n    error: 'geocode_failed',\n    failedLocations: failed,\n    response_hint: 'Không tìm thấy tọa độ cho: ' + failed.join(', ')\n  };\n}\n\nfunction haversine(lat1, lng1, lat2, lng2) {\n  const R = 6371;\n  const dLat = (lat2 - lat1) * Math.PI / 180;\n  const dLng = (lng2 - lng1) * Math.PI / 180;\n  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +\n    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *\n    Math.sin(dLng/2) * Math.sin(dLng/2);\n  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));\n}\n\nconst orsDistances = orsResponse?.distances?.[0];\nconst orsDurations = orsResponse?.durations?.[0];\nconst orsOK = Array.isArray(orsDistances) && orsDistances.length > 0 && orsDistances[0] != null;\n\nlet distance_km, duration_min, distance_source;\n\nif (orsOK) {\n  distance_km = Math.round(orsDistances[0] / 100) / 10;\n  duration_min = Math.round(orsDurations[0] / 60);\n  distance_source = 'ors';\n  console.log('[FormatDistance] ORS:', distance_km, 'km,', duration_min, 'min');\n} else {\n  distance_km = Math.round(haversine(\n    prevData.originLat, prevData.originLng,\n    prevData.destLat, prevData.destLng\n  ) * 10) / 10;\n  duration_min = null;\n  distance_source = 'haversine';\n  console.log('[FormatDistance] Haversine fallback:', distance_km, 'km');\n}\n\nreturn {\n  intent: 'GET_DISTANCE',\n  distance_info: {\n    origin: { name: prevData.originName, lat: prevData.originLat, lng: prevData.originLng },\n    destination: { name: prevData.destName, lat: prevData.destLat, lng: prevData.destLng },\n    road_distance_km: distance_km,\n    drive_duration_min: duration_min,\n    distance_source\n  },\n  has_results: true\n};"
       },
-      "id": "c99dcf1d-9084-4f2a-af5a-d4888a6c4248",
-      "name": "Fn_ParseGuardResponse",
+      "id": "fn-format-distance",
+      "name": "Fn_FormatDistance",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        60832,
-        68192
+        60608,
+        67400
       ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO distance_cache (cache_key, response_data, expires_at) SELECT '{{ $('Fn_BuildDistanceORS').item.json.distanceCacheKey }}', '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb, NOW() + INTERVAL '1 day' WHERE '{{ $json.has_results }}' = 'true' ON CONFLICT (cache_key) DO UPDATE SET response_data = EXCLUDED.response_data, expires_at = EXCLUDED.expires_at;"
+      },
+      "id": "db-write-distance-cache",
+      "name": "DB_WriteDistanceCache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        60832,
+        67600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
+      }
     },
     {
       "parameters": {
@@ -1113,13 +1576,47 @@
         "responseBody": "={{ $json }}",
         "options": {}
       },
-      "id": "c2424688-fba9-492d-a100-f70a68c7a014",
+      "id": "respond-final",
       "name": "Respond_Final",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        61856,
-        68432
+        62400,
+        68400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO request_log (session_id, intent, latency_ms, cache_hit_weather, cache_hit_distance, knowledge_hit, fallback_triggered, clarification_triggered, error_type) VALUES ('{{ $json._log ? $json._log.sessionId : \"unknown\" }}', '{{ $json._log ? $json._log.intent : \"UNKNOWN\" }}', {{ $json._log ? ($json._log.latencyMs || 0) : 0 }}, {{ $json._log ? $json._log.cacheHitWeather : false }}, {{ $json._log ? $json._log.cacheHitDistance : false }}, {{ $json._log ? $json._log.knowledgeHit : false }}, {{ $json._log ? $json._log.fallbackTriggered : false }}, {{ $json._log ? $json._log.clarificationTriggered : false }}, {{ $json._log && $json._log.errorType ? \"'\" + $json._log.errorType + \"'\" : 'NULL' }});"
+      },
+      "id": "db-write-request-log",
+      "name": "DB_WriteRequestLog",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        62624,
+        68600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "POI Override DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== DIRECT RESPONSE FORMATTER =====\n// Deterministic template-based responses — NO AI, NO external API\n// Handles all 7 intents with structured templates\n// Follows instruction: \"AI Does ONLY 2 Things: Choose intent + Extract entities\"\n\nconst data = $json;\nconst intent = data.intent || 'UNKNOWN';\n\n// ─── Metrics ───\nlet _st = null, _sid = null;\ntry { _st = $('Fn_NormalizeInput').item.json._startTime; _sid = $('Fn_NormalizeInput').item.json.sessionId; } catch(e) {}\n\nlet _cacheWeather = false, _cacheDist = false, _knowledge = false;\ntry { _cacheWeather = !!$('Fn_WeatherCacheGuard').item.json._cacheHit; } catch(e) {}\ntry { _cacheDist = !!$('Fn_DistanceCacheGuard').item.json.distanceCacheHit; } catch(e) {}\ntry { _knowledge = data.source === 'knowledge_db'; } catch(e) {}\n\nfunction buildLog(extra) {\n  return {\n    sessionId: _sid || 'unknown',\n    intent,\n    latencyMs: _st ? Date.now() - _st : 0,\n    cacheHitWeather: _cacheWeather,\n    cacheHitDistance: _cacheDist,\n    knowledgeHit: _knowledge,\n    fallbackTriggered: false,\n    clarificationTriggered: false,\n    errorType: null,\n    ...(extra || {})\n  };\n}\n\nlet response = '';\nlet need_tool = true;\nlet tool_name = null;\nlet tool_input = {};\n\nswitch (intent) {\n\n  // ═══════════ GET_PLACE_INFO ═══════════\n  case 'GET_PLACE_INFO': {\n    const p = data.place_info || {};\n    tool_name = data.source === 'knowledge_db' ? 'DB_PlaceMetadataLookup' : 'HTTP_SearchPlaceInfo';\n    tool_input = { place_name: p.name };\n\n    if (!p.name && !p.description) {\n      response = 'Không tìm thấy thông tin cho địa điểm này. Vui lòng thử lại với tên cụ thể hơn.';\n      break;\n    }\n\n    const parts = ['📍 **' + (p.name || 'Địa điểm') + '**'];\n    if (p.description) parts.push('\\n' + p.description);\n    if (p.ticket_price) parts.push('\\n🎫 **Giá vé**: ' + p.ticket_price);\n    else parts.push('\\n🎫 **Giá vé**: Chưa có thông tin chính thức');\n    if (p.opening_hours) parts.push('\\n🕐 **Giờ mở cửa**: ' + p.opening_hours);\n    if (p.open_status_text) parts.push('\\n📌 ' + p.open_status_text);\n    if (p.address) parts.push('\\n📫 **Địa chỉ**: ' + p.address);\n    if (data.source === 'knowledge_db') parts.push('\\n\\n_Nguồn: Cơ sở dữ liệu nội bộ_');\n    parts.push('\\n\\nBạn muốn biết thêm gì về địa điểm này?');\n    response = parts.join('');\n    break;\n  }\n\n  // ═══════════ GET_WEATHER ═══════════\n  case 'GET_WEATHER': {\n    const loc = data.location || 'khu vực';\n\n    if (data.isForecast) {\n      // ── Forecast ──\n      const forecast = data.forecast_raw || [];\n      tool_name = 'HTTP_GetWeatherForecast';\n      tool_input = { location: loc, days: forecast.length };\n\n      if (forecast.length === 0) {\n        response = 'Không lấy được dữ liệu dự báo thời tiết cho **' + loc + '**.';\n        break;\n      }\n\n      const parts = ['🌤️ **Dự báo thời tiết ' + loc + '** (' + (data.timeDescription || '') + '):'];\n      if (data.current_snapshot) {\n        const c = data.current_snapshot;\n        parts.push('\\n📌 Hiện tại: ' + c.temp_c + '°C, ' + c.condition + ', độ ẩm ' + c.humidity + '%');\n      }\n      for (const day of forecast) {\n        let line = '\\n📅 **' + day.date + '**: ' + day.mintemp_c + '°C - ' + day.maxtemp_c + '°C, ' + day.condition;\n        if (day.chance_of_rain > 30) line += ' | 🌧️ ' + day.chance_of_rain + '% mưa';\n        if (day.uv != null && day.uv >= 6) line += ' | ☀️ UV: ' + day.uv + ' (cao)';\n        parts.push(line);\n      }\n      parts.push('\\n\\nBạn cần chuẩn bị gì cho chuyến đi?');\n      response = parts.join('');\n\n    } else {\n      // ── Current weather ──\n      const w = data.weather_raw;\n      tool_name = 'HTTP_GetWeather';\n      tool_input = { location: loc };\n\n      if (!w) {\n        response = 'Không lấy được dữ liệu thời tiết cho **' + loc + '**.';\n        break;\n      }\n\n      const parts = ['🌡️ **Thời tiết ' + loc + (data.localtime ? ' (' + data.localtime + ')' : '') + '**:'];\n      parts.push('\\n🌡️ Nhiệt độ: ' + w.temp_c + '°C (cảm giác ' + w.feelslike_c + '°C)');\n      parts.push('\\n🌤️ Tình trạng: ' + w.condition);\n      parts.push('\\n💧 Độ ẩm: ' + w.humidity + '%');\n      parts.push('\\n💨 Gió: ' + w.wind_kph + ' km/h, hướng ' + w.wind_dir);\n      if (w.precip_mm > 0) parts.push('\\n🌧️ Lượng mưa: ' + w.precip_mm + 'mm');\n      if (w.uv != null) {\n        parts.push('\\n☀️ UV: ' + w.uv);\n        if (w.uv >= 6) parts.push(' ⚠️ Nên che chắn khi ra ngoài');\n      }\n      if (w.air_quality) {\n        const aq = w.air_quality;\n        parts.push('\\n🌫️ Không khí: PM2.5: ' + aq.pm2_5 + ' (' + aq.label + ')');\n        if (aq.pm2_5 > 35) parts.push(' ⚠️ Nên hạn chế hoạt động ngoài trời');\n      }\n      parts.push('\\n\\nBạn muốn xem dự báo những ngày tới không?');\n      response = parts.join('');\n    }\n    break;\n  }\n\n  // ═══════════ GET_DISTANCE ═══════════\n  case 'GET_DISTANCE': {\n    const d = data.distance_info;\n\n    if (data.error === 'geocode_failed') {\n      const failed = data.failedLocations || [];\n      response = 'Không tìm thấy tọa độ cho: ' + failed.join(', ') + '.\\n\\nVui lòng thử ghi rõ hơn, ví dụ: \"Từ Hà Nội đến Đà Nẵng\"';\n      need_tool = false;\n      break;\n    }\n\n    if (!d) {\n      response = 'Không tính được khoảng cách. Vui lòng thử lại.';\n      need_tool = false;\n      break;\n    }\n\n    tool_name = d.distance_source === 'ors' ? 'HTTP_ORS_DistanceCalc' : 'haversine';\n    tool_input = { origin: d.origin && d.origin.name, destination: d.destination && d.destination.name };\n\n    const oName = (d.origin && d.origin.name) || '?';\n    const dName = (d.destination && d.destination.name) || '?';\n    const parts = ['📏 **Khoảng cách từ ' + oName + ' đến ' + dName + '**:'];\n\n    if (d.distance_source === 'ors') {\n      parts.push('\\n🛣️ Đường bộ: **' + d.road_distance_km + ' km**');\n      if (d.drive_duration_min) {\n        const hours = Math.floor(d.drive_duration_min / 60);\n        const mins = d.drive_duration_min % 60;\n        const timeStr = hours > 0 ? hours + ' giờ ' + mins + ' phút' : mins + ' phút';\n        parts.push('\\n⏱️ Thời gian lái xe: khoảng **' + timeStr + '**');\n      }\n    } else {\n      parts.push('\\n✈️ Đường chim bay: **' + d.road_distance_km + ' km**');\n      parts.push('\\n_Lưu ý: Khoảng cách thực tế đường bộ có thể dài hơn._');\n    }\n\n    parts.push('\\n\\nBạn muốn tìm hiểu thêm gì về lộ trình này?');\n    response = parts.join('');\n    break;\n  }\n\n  // ═══════════ SEARCH_NEARBY ═══════════\n  case 'SEARCH_NEARBY': {\n    const places = data.nearby_raw || [];\n    tool_name = 'HTTP_SearchNearby';\n    tool_input = { poi_type: data.poiType };\n\n    if (places.length === 0) {\n      response = 'Không tìm thấy ' + (data.poiType || 'địa điểm') + ' nào xung quanh bạn.';\n      break;\n    }\n\n    const top = places.slice(0, 5);\n    const parts = ['📍 **' + top.length + ' ' + (data.poiType || 'địa điểm') + ' gần bạn**:'];\n\n    for (const p of top) {\n      let line = '\\n' + p.rank + '. **' + p.name + '**';\n      if (p.road_distance_km != null) {\n        if (p.distance_source === 'ors') {\n          line += ' - ' + p.road_distance_km + ' km';\n          if (p.drive_duration_min) line += ' (~' + p.drive_duration_min + ' phút)';\n        } else if (p.distance_source === 'haversine') {\n          line += ' - ' + p.road_distance_km + ' km (đường chim bay)';\n        }\n      }\n      if (p.rating) line += ' ⭐ ' + p.rating;\n      if (p.address) line += '\\n   📫 ' + p.address;\n      parts.push(line);\n    }\n\n    parts.push('\\n\\nBạn muốn biết thêm về địa điểm nào?');\n    response = parts.join('');\n    break;\n  }\n\n  // ═══════════ SEARCH_TOUR ═══════════\n  case 'SEARCH_TOUR': {\n    const tours = data.tours_raw || [];\n    tool_name = 'HTTP_SearchTour';\n    tool_input = { location: data.location, duration: data.duration };\n\n    if (tours.length === 0) {\n      response = 'Không tìm thấy tour' + (data.location ? ' tại ' + data.location : '') + '.';\n      break;\n    }\n\n    const dur = data.duration ? ' ' + data.duration + ' ngày' : '';\n    const loc = data.location ? ' ' + data.location : '';\n    const parts = ['🧳 **Tour' + dur + loc + '**:'];\n\n    for (let i = 0; i < tours.length; i++) {\n      const t = tours[i];\n      parts.push('\\n' + (i + 1) + '. **' + t.title + '**');\n      if (t.snippet) parts.push('\\n   ' + t.snippet.substring(0, 150));\n      if (t.provider) parts.push('\\n   📎 ' + t.provider);\n    }\n\n    parts.push('\\n\\nBạn muốn xem chi tiết tour nào?');\n    response = parts.join('');\n    break;\n  }\n\n  // ═══════════ SEARCH_HOTEL ═══════════\n  case 'SEARCH_HOTEL': {\n    const hotels = data.hotels_raw || [];\n    tool_name = 'HTTP_SearchHotel';\n    tool_input = { location: data.location };\n\n    if (hotels.length === 0) {\n      response = 'Không tìm thấy khách sạn' + (data.location ? ' tại ' + data.location : '') + '.';\n      break;\n    }\n\n    const parts = ['🏨 **Khách sạn' + (data.location ? ' tại ' + data.location : '') + '**:'];\n\n    for (let i = 0; i < hotels.length; i++) {\n      const h = hotels[i];\n      let line = '\\n' + (i + 1) + '. **' + h.name + '**';\n      if (h.rating) line += ' ⭐ ' + h.rating;\n      if (h.price) line += ' | 💰 ' + h.price;\n      if (h.address) line += '\\n   📫 ' + h.address;\n      parts.push(line);\n    }\n\n    parts.push('\\n\\nBạn muốn biết thêm về khách sạn nào?');\n    response = parts.join('');\n    break;\n  }\n\n  // ═══════════ SEARCH_POI ═══════════\n  case 'SEARCH_POI': {\n    const pois = data.poi_raw || [];\n    tool_name = 'HTTP_SearchPOI';\n    tool_input = { location: data.location };\n\n    if (pois.length === 0) {\n      response = 'Không tìm thấy điểm tham quan' + (data.location ? ' tại ' + data.location : '') + '.';\n      break;\n    }\n\n    const parts = ['🏞️ **Điểm tham quan' + (data.location ? ' ' + data.location : '') + '**:'];\n\n    for (let i = 0; i < pois.length; i++) {\n      const p = pois[i];\n      parts.push('\\n' + (i + 1) + '. **' + p.name + '**');\n      if (p.short_fact) parts.push('\\n   ' + p.short_fact.substring(0, 150));\n    }\n\n    parts.push('\\n\\nBạn muốn biết chi tiết về địa điểm nào?');\n    response = parts.join('');\n    break;\n  }\n\n  // ═══════════ DEFAULT ═══════════\n  default: {\n    response = 'Xin lỗi, tôi chưa hỗ trợ yêu cầu này.\\n\\nTôi có thể giúp:\\n🌦️ Thời tiết\\n📍 Thông tin địa điểm\\n🏞️ Điểm tham quan\\n🧳 Tour du lịch\\n🏨 Khách sạn\\n📏 Khoảng cách\\n📍 Tìm gần tôi';\n    need_tool = false;\n  }\n}\n\nreturn {\n  intent,\n  need_tool,\n  tool_name,\n  tool_input,\n  response_to_user: response,\n  response,\n  type: data.has_results !== false ? 'success' : 'no_results',\n  _log: buildLog()\n};"
+      },
+      "id": "fn-direct-response-formatter",
+      "name": "Fn_DirectResponseFormatter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        61728,
+        68400
       ]
     }
   ],
@@ -1139,36 +1636,7 @@
       "main": [
         [
           {
-            "node": "IF_IsTravelDomain",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "IF_IsTravelDomain": {
-      "main": [
-        [
-          {
             "node": "Fn_DetectIntentRuleBased",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Respond_OutOfScope",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Respond_OutOfScope": {
-      "main": [
-        [
-          {
-            "node": "Respond_Final",
             "type": "main",
             "index": 0
           }
@@ -1190,47 +1658,66 @@
       "main": [
         [
           {
-            "node": "IF_NeedIntentClarification",
+            "node": "IF_NeedClarification",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "IF_NeedIntentClarification": {
+    "IF_NeedClarification": {
       "main": [
         [
           {
-            "node": "Respond_ClarifyIntent",
+            "node": "Respond_Clarify",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Switch_SpecialIntent",
+            "node": "Switch_Pipeline",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Respond_ClarifyIntent": {
+    "Respond_Clarify": {
       "main": [
         [
           {
             "node": "Respond_Final",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "DB_WriteRequestLog",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
     },
-    "Switch_SpecialIntent": {
+    "Switch_Pipeline": {
       "main": [
         [
           {
-            "node": "IF_Nearby_NoLocation",
+            "node": "Fn_ExtractLocation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_ResolvePlaceName",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_BuildNearbySearch",
             "type": "main",
             "index": 0
           }
@@ -1244,207 +1731,7 @@
         ],
         [
           {
-            "node": "IF_PlaceInfo_NoPlaceName",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "IF_NeedLocationClarification",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "IF_Nearby_NoLocation": {
-      "main": [
-        [
-          {
-            "node": "Respond_RequestLocation",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Fn_BuildNearbySearch",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Respond_RequestLocation": {
-      "main": [
-        [
-          {
-            "node": "Respond_Final",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fn_BuildNearbySearch": {
-      "main": [
-        [
-          {
-            "node": "HTTP_SearchNearby",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP_SearchNearby": {
-      "main": [
-        [
-          {
-            "node": "Fn_FormatNearby",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fn_FormatNearby": {
-      "main": [
-        [
-          {
-            "node": "Fn_BuildAIInput",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fn_ParseTourDuration": {
-      "main": [
-        [
-          {
-            "node": "IF_Tour_NoLocation",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "IF_Tour_NoLocation": {
-      "main": [
-        [
-          {
-            "node": "Respond_ClarifyTourLocation",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "HTTP_SearchTour",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Respond_ClarifyTourLocation": {
-      "main": [
-        [
-          {
-            "node": "Respond_Final",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP_SearchTour": {
-      "main": [
-        [
-          {
-            "node": "Fn_FormatTour",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fn_FormatTour": {
-      "main": [
-        [
-          {
-            "node": "Fn_BuildAIInput",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "IF_PlaceInfo_NoPlaceName": {
-      "main": [
-        [
-          {
-            "node": "Respond_ClarifyPlaceName",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Fn_ResolvePlaceName",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Respond_ClarifyPlaceName": {
-      "main": [
-        [
-          {
-            "node": "Respond_Final",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fn_ResolvePlaceName": {
-      "main": [
-        [
-          {
-            "node": "HTTP_SearchPlaceInfo",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "IF_NeedLocationClarification": {
-      "main": [
-        [
-          {
-            "node": "Respond_ClarifyLocation",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Fn_ExtractLocation",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Respond_ClarifyLocation": {
-      "main": [
-        [
-          {
-            "node": "Respond_Final",
+            "node": "Fn_ExtractDistanceEntities",
             "type": "main",
             "index": 0
           }
@@ -1466,7 +1753,7 @@
       "main": [
         [
           {
-            "node": "HTTP_Geocode",
+            "node": "Fn_NormalizeAlias",
             "type": "main",
             "index": 0
           }
@@ -1485,6 +1772,73 @@
         [
           {
             "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DB_WriteRequestLog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NormalizeAlias": {
+      "main": [
+        [
+          {
+            "node": "DB_POI_Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_POI_Lookup": {
+      "main": [
+        [
+          {
+            "node": "Fn_DBResultGuard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_DBResultGuard": {
+      "main": [
+        [
+          {
+            "node": "IF_DBMatch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_DBMatch": {
+      "main": [
+        [
+          {
+            "node": "Fn_UseDBResult",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_Geocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_UseDBResult": {
+      "main": [
+        [
+          {
+            "node": "Switch_RouteToAPI",
             "type": "main",
             "index": 0
           }
@@ -1538,6 +1892,11 @@
             "node": "Respond_Final",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "DB_WriteRequestLog",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1553,7 +1912,7 @@
         ],
         [
           {
-            "node": "HTTP_GetWeather",
+            "node": "Fn_NormalizeWeatherTime",
             "type": "main",
             "index": 0
           }
@@ -1561,6 +1920,61 @@
         [
           {
             "node": "HTTP_SearchHotel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ResolvePlaceName": {
+      "main": [
+        [
+          {
+            "node": "Fn_NormalizePlaceAlias",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NormalizePlaceAlias": {
+      "main": [
+        [
+          {
+            "node": "DB_PlaceMetadataLookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_PlaceMetadataLookup": {
+      "main": [
+        [
+          {
+            "node": "Fn_PlaceMetadataGuard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_PlaceMetadataGuard": {
+      "main": [
+        [
+          {
+            "node": "IF_HasPlaceMetadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_HasPlaceMetadata": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatPlaceFromDB",
             "type": "main",
             "index": 0
           }
@@ -1574,33 +1988,11 @@
         ]
       ]
     },
-    "HTTP_SearchPOI": {
+    "Fn_FormatPlaceFromDB": {
       "main": [
         [
           {
-            "node": "Fn_FormatPOI",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP_GetWeather": {
-      "main": [
-        [
-          {
-            "node": "Fn_FormatWeather",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP_SearchHotel": {
-      "main": [
-        [
-          {
-            "node": "Fn_FormatHotel",
+            "node": "Fn_DirectResponseFormatter",
             "type": "main",
             "index": 0
           }
@@ -1618,11 +2010,201 @@
         ]
       ]
     },
+    "Fn_FormatPlaceInfo": {
+      "main": [
+        [
+          {
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_BuildNearbySearch": {
+      "main": [
+        [
+          {
+            "node": "HTTP_SearchNearby",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchNearby": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatNearbyAndBuildORS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatNearbyAndBuildORS": {
+      "main": [
+        [
+          {
+            "node": "HTTP_ORS_Matrix",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_ORS_Matrix": {
+      "main": [
+        [
+          {
+            "node": "Fn_EnrichWithDistances",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_EnrichWithDistances": {
+      "main": [
+        [
+          {
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_ParseTourDuration": {
+      "main": [
+        [
+          {
+            "node": "HTTP_SearchTour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchTour": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatTour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatTour": {
+      "main": [
+        [
+          {
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchPOI": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatPOI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Fn_FormatPOI": {
       "main": [
         [
           {
-            "node": "Fn_BuildAIInput",
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_NormalizeWeatherTime": {
+      "main": [
+        [
+          {
+            "node": "DB_CheckWeatherCache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_CheckWeatherCache": {
+      "main": [
+        [
+          {
+            "node": "Fn_WeatherCacheGuard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_WeatherCacheGuard": {
+      "main": [
+        [
+          {
+            "node": "Switch_WeatherMode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_WeatherMode": {
+      "main": [
+        [
+          {
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_GetWeatherForecast",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_GetWeather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GetWeather": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatWeather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GetWeatherForecast": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatWeatherForecast",
             "type": "main",
             "index": 0
           }
@@ -1633,7 +2215,39 @@
       "main": [
         [
           {
-            "node": "Fn_BuildAIInput",
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DB_WriteWeatherCache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatWeatherForecast": {
+      "main": [
+        [
+          {
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DB_WriteWeatherCache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_SearchHotel": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatHotel",
             "type": "main",
             "index": 0
           }
@@ -1644,51 +2258,174 @@
       "main": [
         [
           {
-            "node": "Fn_BuildAIInput",
+            "node": "Fn_DirectResponseFormatter",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Fn_FormatPlaceInfo": {
+    "Fn_ExtractDistanceEntities": {
       "main": [
         [
           {
-            "node": "Fn_BuildAIInput",
+            "node": "DB_DistancePOILookup",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Fn_BuildAIInput": {
+    "DB_DistancePOILookup": {
       "main": [
         [
           {
-            "node": "AI_Response_Guard",
+            "node": "Fn_ResolveDistanceCoords",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "AI_Response_Guard": {
+    "Fn_ResolveDistanceCoords": {
       "main": [
         [
           {
-            "node": "Fn_ParseGuardResponse",
+            "node": "IF_AllCoordsResolved",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Fn_ParseGuardResponse": {
+    "IF_AllCoordsResolved": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildDistanceORS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_GeocodeOrigin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GeocodeOrigin": {
+      "main": [
+        [
+          {
+            "node": "HTTP_GeocodeDestination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_GeocodeDestination": {
+      "main": [
+        [
+          {
+            "node": "Fn_BuildDistanceORS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_BuildDistanceORS": {
+      "main": [
+        [
+          {
+            "node": "DB_CheckDistanceCache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_CheckDistanceCache": {
+      "main": [
+        [
+          {
+            "node": "Fn_DistanceCacheGuard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_DistanceCacheGuard": {
+      "main": [
+        [
+          {
+            "node": "IF_DistanceCacheHit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_DistanceCacheHit": {
+      "main": [
+        [
+          {
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP_ORS_DistanceCalc",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_ORS_DistanceCalc": {
+      "main": [
+        [
+          {
+            "node": "Fn_FormatDistance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_FormatDistance": {
+      "main": [
+        [
+          {
+            "node": "Fn_DirectResponseFormatter",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DB_WriteDistanceCache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_DirectResponseFormatter": {
       "main": [
         [
           {
             "node": "Respond_Final",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DB_WriteRequestLog",
             "type": "main",
             "index": 0
           }
@@ -1697,6 +2434,12 @@
     }
   },
   "pinData": {},
+  "settings": {
+    "executionOrder": "v2",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "executionTimeout": 120
+  },
   "meta": {
     "instanceId": "8298d6d82438e8d5ee28189bff4aaace26c9e5a75151cb6d6f4c18d7bb992ea7"
   }
