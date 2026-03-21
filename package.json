@@ -1,0 +1,31 @@
+{
+  "name": "n8n-travel-chatbot",
+  "version": "1.0.0",
+  "description": "n8n Travel Chatbot with Gemini API",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "n8n start",
+    "dev": "n8n start",
+    "start:log": "n8n start > logs/n8n-stdout.log 2>&1",
+    "tunnel": "n8n start --tunnel",
+    "memory": "node ./main_travel_assistant/memory-server.js",
+    "update": "npm install -g n8n@2.0.0"
+  },
+  "keywords": [
+    "n8n",
+    "workflow",
+    "automation",
+    "chatbot",
+    "gemini"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "n8n": "2.0.2",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.10.0 <=20.x"
+  }
+}

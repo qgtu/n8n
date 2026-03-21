@@ -1,0 +1,26 @@
+{
+  "name": "travel-bot-backend",
+  "version": "1.0.0",
+  "description": "Production backend for Travel Bot — extracted from n8n workflow",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.13.1",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/pg": "^8.11.10",
+    "@types/node": "^20.17.0",
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=18.10.0"
+  }
+}
