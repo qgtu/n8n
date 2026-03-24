@@ -75,14 +75,12 @@ psql -U postgres -d disciplined_travel -f schema.sql
 psql -U postgres -d disciplined_travel -f sample_data.sql
 ```
 
-## 7) Chạy dự án
+## 7) Chạy Telegram webhook đúng quy trình (bắt buộc có ngrok)
 
-### Chạy n8n (root)
-```bash
-npm run start
-```
+Với Telegram webhook, `localhost` không được Telegram gọi trực tiếp.  
+Bạn cần URL HTTPS public (ví dụ ngrok).
 
-### Chạy backend Telegram (terminal khác)
+### Bước 1 — Chạy backend
 ```bash
 cd main_travel_assistant
 npm run dev
@@ -92,14 +90,61 @@ Backend expose:
 - `GET /health`
 - `POST /api/webhook/telegram`
 
-## 8) Import workflow n8n
+### Bước 2 — Mở tunnel ngrok đến backend port 3000
+```bash
+ngrok http 3000
+```
 
+Lấy URL HTTPS từ ngrok, ví dụ:
+`https://abc123.ngrok-free.app`
+
+### Bước 3 — Cập nhật `.env` backend
+```env
+TELEGRAM_MODE=webhook
+TELEGRAM_WEBHOOK_URL=https://abc123.ngrok-free.app/api/webhook/telegram
+TELEGRAM_SECRET_TOKEN=your_secret_token
+```
+
+Sau khi sửa `.env`, restart backend (`npm run dev`).
+
+### Bước 4 — Set webhook cho Telegram
+```bash
+curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://abc123.ngrok-free.app/api/webhook/telegram&secret_token=<TELEGRAM_SECRET_TOKEN>"
+```
+
+### Bước 5 — Verify webhook
+```bash
+curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
+```
+
+`url` phải đúng với URL ngrok hiện tại, `last_error_message` nên rỗng.
+
+### Bước 6 — Test bot
+Nhắn tin cho bot trên Telegram và xem log ở terminal backend.
+
+## 8) Chạy n8n và import workflow
+
+### Chạy n8n (root)
+```bash
+npm run start
+```
+
+### Import workflow
 1. Mở n8n UI (mặc định `http://localhost:5678`)
 2. Import file: `main_travel_assistant/rule_first_travel_bot.json`
 3. Cập nhật credential/API key trong workflow nếu cần
 4. Activate workflow
 
-## 9) Bảo mật `.env` (tránh đẩy nhầm secret)
+## 9) Troubleshooting webhook
+
+- **Bot không phản hồi**: kiểm tra `getWebhookInfo`, thường do URL ngrok đổi.
+- **403 Unauthorized**: `TELEGRAM_SECRET_TOKEN` không khớp giữa server và `setWebhook`.
+- **Connection refused**: backend chưa chạy hoặc sai port.
+- **Vẫn thấy BotFather text**: bạn đang chat với `@BotFather`, không phải bot của bạn.
+
+Khi lộ token bot, bắt buộc vào `@BotFather` dùng `/revoke`, cập nhật token mới trong `.env`, rồi `setWebhook` lại.
+
+## 10) Bảo mật `.env` (tránh đẩy nhầm secret)
 
 Repository đã có rule ignore:
 - `.env`
@@ -119,6 +164,6 @@ git rm --cached main_travel_assistant/.env
 git commit -m "Stop tracking env files"
 ```
 
-## 10) Tài liệu thêm
+## 11) Tài liệu thêm
 
 - `README-MEMORY.md`: hướng dẫn memory service và flow tham khảo.
